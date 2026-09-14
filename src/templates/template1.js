@@ -1,3 +1,6 @@
+import { v4 as uuidv4 } from "uuid";
+import { Cardinality } from "../data/constants";
+
 export const template1 = {
   tables: [
     {
@@ -289,7 +292,7 @@ export const template1 = {
       endTableId: 0,
       endFieldId: 0,
       name: "blog_posts_user_id_fk",
-      cardinality: "Many to one",
+      cardinality: Cardinality.MANY_TO_ONE,
       updateConstraint: "No action",
       deleteConstraint: "No action",
       id: 0,
@@ -300,7 +303,7 @@ export const template1 = {
       endTableId: 1,
       endFieldId: 0,
       name: "comments_blog_id_fk",
-      cardinality: "Many to one",
+      cardinality: Cardinality.MANY_TO_ONE,
       updateConstraint: "No action",
       deleteConstraint: "No action",
       id: 1,
@@ -311,7 +314,7 @@ export const template1 = {
       endTableId: 0,
       endFieldId: 0,
       name: "comments_user_id_fk",
-      cardinality: "Many to one",
+      cardinality: Cardinality.MANY_TO_ONE,
       updateConstraint: "No action",
       deleteConstraint: "No action",
       id: 2,
@@ -322,7 +325,7 @@ export const template1 = {
       endTableId: 3,
       endFieldId: 0,
       name: "blog_tag_tag_id_fk",
-      cardinality: "Many to one",
+      cardinality: Cardinality.MANY_TO_ONE,
       updateConstraint: "No action",
       deleteConstraint: "No action",
       id: 3,
@@ -333,7 +336,7 @@ export const template1 = {
       endTableId: 1,
       endFieldId: 0,
       name: "blog_tag_blog_id_fk",
-      cardinality: "Many to one",
+      cardinality: Cardinality.MANY_TO_ONE,
       updateConstraint: "No action",
       deleteConstraint: "No action",
       id: 4,
@@ -346,4 +349,5 @@ export const template1 = {
   description:
     "A blog database including tables such as posts, users, comments, and tags to facilitate the storage and retrieval of blog-related information.",
   custom: 0,
+  templateId: uuidv4(),
 };

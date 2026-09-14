@@ -1,6 +1,7 @@
+import { nanoid } from "nanoid";
 import { Cardinality, DB } from "../../data/constants";
 import { dbToTypes } from "../../data/datatypes";
-import { buildSQLFromAST } from "./shared";
+import { buildSQLFromAST, findReferencedTable } from "./shared";
 
 const affinity = {
   [DB.MARIADB]: new Proxy(
@@ -23,7 +24,7 @@ export function fromMariaDB(ast, diagramDb = DB.GENERIC) {
   const tables = [];
   const relationships = [];
 
-  ast.forEach((e) => {
+  const parseSingleStatement = (e) => {
     if (e.type === "create") {
       if (e.keyword === "table") {
         const table = {};
@@ -32,10 +33,12 @@ export function fromMariaDB(ast, diagramDb = DB.GENERIC) {
         table.color = "#175e7a";
         table.fields = [];
         table.indices = [];
-        table.id = tables.length;
+        table.uniqueConstraints = [];
+        table.id = nanoid();
         e.create_definitions.forEach((d) => {
           if (d.resource === "column") {
             const field = {};
+            field.id = nanoid();
             field.name = d.column.column;
 
             let type = d.definition.dataType;
@@ -47,7 +50,7 @@ export function fromMariaDB(ast, diagramDb = DB.GENERIC) {
             if (d.definition.expr && d.definition.expr.type === "expr_list") {
               field.values = d.definition.expr.value.map((v) => v.value);
             }
-            field.comment = "";
+            field.comment = d.comment ? d.comment.value.value : "";
             field.unique = false;
             if (d.unique) field.unique = true;
             field.increment = false;
@@ -105,32 +108,48 @@ export function fromMariaDB(ast, diagramDb = DB.GENERIC) {
                   }
                 });
               });
-            } else if (d.constraint_type === "FOREIGN KEY") {
+            } else if (d.constraint_type.toLowerCase() === "foreign key") {
               const relationship = {};
               const startTableId = table.id;
-              const startTable = e.table[0].table;
-              const startField = d.definition[0].column;
-              const endTable = d.reference_definition.table[0].table;
-              const endField = d.reference_definition.definition[0].column;
-
-              const endTableId = tables.findIndex((t) => t.name === endTable);
-              if (endTableId === -1) return;
-
-              const endFieldId = tables[endTableId].fields.findIndex(
-                (f) => f.name === endField,
+              const startTableName = e.table[0].table;
+              const startFieldNames = d.definition.map((c) => c.column);
+              const endTableName = d.reference_definition.table[0].table;
+              const endFieldNames = d.reference_definition.definition.map(
+                (c) => c.column,
               );
-              if (endField === -1) return;
+              const startFieldName = startFieldNames[0];
 
-              const startFieldId = table.fields.findIndex(
-                (f) => f.name === startField,
+              const endTable = findReferencedTable(
+                tables,
+                table,
+                endTableName,
               );
-              if (startFieldId === -1) return;
+              if (!endTable) return;
 
-              relationship.name = startTable + "_" + startField + "_fk";
+              const fieldPairs = [];
+              for (let i = 0; i < startFieldNames.length; i++) {
+                const sf = table.fields.find(
+                  (f) => f.name === startFieldNames[i],
+                );
+                const ef = endTable.fields.find(
+                  (f) => f.name === endFieldNames[i],
+                );
+                if (!sf || !ef) break;
+                fieldPairs.push({ startFieldId: sf.id, endFieldId: ef.id });
+              }
+              if (fieldPairs.length !== startFieldNames.length) return;
+
+              const startField = table.fields.find(
+                (f) => f.name === startFieldName,
+              );
+
+              relationship.name = `fk_${startTableName}_${startFieldName}_${endTableName}`;
               relationship.startTableId = startTableId;
-              relationship.endTableId = endTableId;
-              relationship.endFieldId = endFieldId;
-              relationship.startFieldId = startFieldId;
+              relationship.endTableId = endTable.id;
+              relationship.fields = fieldPairs;
+              relationship.endFieldId = fieldPairs[0].endFieldId;
+              relationship.startFieldId = fieldPairs[0].startFieldId;
+              relationship.id = nanoid()
               let updateConstraint = "No action";
               let deleteConstraint = "No action";
               d.reference_definition.on_action.forEach((c) => {
@@ -149,47 +168,73 @@ export function fromMariaDB(ast, diagramDb = DB.GENERIC) {
 
               relationship.updateConstraint = updateConstraint;
               relationship.deleteConstraint = deleteConstraint;
-              relationship.cardinality = Cardinality.ONE_TO_ONE;
+
+              if (startField.unique) {
+                relationship.cardinality = Cardinality.ONE_TO_ONE;
+              } else {
+                relationship.cardinality = Cardinality.MANY_TO_ONE;
+              }
+
               relationships.push(relationship);
+            } else if (
+              d.constraint_type &&
+              d.constraint_type.toLowerCase().includes("unique")
+            ) {
+              const fields = d.definition.map((c) => c.column);
+              const name =
+                d.constraint ||
+                d.index ||
+                `${table.name}_unique_${table.uniqueConstraints.length}`;
+              table.uniqueConstraints.push({ name, fields });
+              table.uniqueConstraints.forEach((u, j) => {
+                u.id = j;
+              });
             }
           }
         });
-        table.fields.forEach((f, j) => {
-          f.id = j;
-        });
-        tables.push(table);
-      } else if (e.keyword === "index") {
-        const index = {};
-        index.name = e.index;
-        index.unique = false;
-        if (e.index_type === "unique") index.unique = true;
-        index.fields = [];
-        e.index_columns.forEach((f) => index.fields.push(f.column));
 
-        let found = -1;
-        tables.forEach((t, i) => {
-          if (found !== -1) return;
-          if (t.name === e.table.table) {
-            t.indices.push(index);
-            found = i;
+        e.table_options?.forEach((opt) => {
+          if (opt.keyword === "comment") {
+            table.comment = opt.value.replace(/^["']|["']$/g, "");
           }
         });
 
-        if (found !== -1) tables[found].indices.forEach((i, j) => (i.id = j));
+        tables.push(table);
+      } else if (e.keyword === "index") {
+        const index = {
+          name: e.index,
+          unique: e.index_type === "unique",
+          fields: e.index_columns.map((f) => f.column),
+        };
+
+        const table = tables.find((t) => t.name === e.table.table);
+
+        if (table) {
+          table.indices.push(index);
+          table.indices.forEach((i, j) => {
+            i.id = j;
+          });
+        }
       }
     } else if (e.type === "alter") {
       e.expr.forEach((expr) => {
         if (
           expr.action === "add" &&
-          expr.create_definitions.constraint_type === "FOREIGN KEY"
+          expr.create_definitions.constraint_type.toLowerCase() ===
+            "foreign key"
         ) {
           const relationship = {};
-          const startTable = e.table[0].table;
-          const startField = expr.create_definitions.definition[0].column;
-          const endTable =
+          const startTableName = e.table[0].table;
+          const startFieldNames = expr.create_definitions.definition.map(
+            (c) => c.column,
+          );
+          const endTableName =
             expr.create_definitions.reference_definition.table[0].table;
-          const endField =
-            expr.create_definitions.reference_definition.definition[0].column;
+          const endFieldNames =
+            expr.create_definitions.reference_definition.definition.map(
+              (c) => c.column,
+            );
+          const startFieldName = startFieldNames[0];
           let updateConstraint = "No action";
           let deleteConstraint = "No action";
           expr.create_definitions.reference_definition.on_action.forEach(
@@ -208,39 +253,57 @@ export function fromMariaDB(ast, diagramDb = DB.GENERIC) {
             },
           );
 
-          const startTableId = tables.findIndex((t) => t.name === startTable);
-          if (startTable === -1) return;
+          const startTable = tables.find((t) => t.name === startTableName);
+          if (!startTable) return;
 
-          const endTableId = tables.findIndex((t) => t.name === endTable);
-          if (endTableId === -1) return;
+          const endTable = tables.find((t) => t.name === endTableName);
+          if (!endTable) return;
 
-          const endFieldId = tables[endTableId].fields.findIndex(
-            (f) => f.name === endField,
+          const fieldPairs = [];
+          for (let i = 0; i < startFieldNames.length; i++) {
+            const sf = startTable.fields.find(
+              (f) => f.name === startFieldNames[i],
+            );
+            const ef = endTable.fields.find(
+              (f) => f.name === endFieldNames[i],
+            );
+            if (!sf || !ef) break;
+            fieldPairs.push({ startFieldId: sf.id, endFieldId: ef.id });
+          }
+          if (fieldPairs.length !== startFieldNames.length) return;
+
+          const startField = startTable.fields.find(
+            (f) => f.name === startFieldName,
           );
-          if (endField === -1) return;
 
-          const startFieldId = tables[startTableId].fields.findIndex(
-            (f) => f.name === startField,
-          );
-          if (startFieldId === -1) return;
-
-          relationship.name = startTable + "_" + startField + "_fk";
-          relationship.startTableId = startTableId;
-          relationship.startFieldId = startFieldId;
-          relationship.endTableId = endTableId;
-          relationship.endFieldId = endFieldId;
+          relationship.name =
+            "fk_" + startTableName + "_" + startFieldName + "_" + endTableName;
+          relationship.startTableId = startTable.id;
+          relationship.startFieldId = fieldPairs[0].startFieldId;
+          relationship.endTableId = endTable.id;
+          relationship.endFieldId = fieldPairs[0].endFieldId;
+          relationship.fields = fieldPairs;
           relationship.updateConstraint = updateConstraint;
           relationship.deleteConstraint = deleteConstraint;
-          relationship.cardinality = Cardinality.ONE_TO_ONE;
-          relationships.push(relationship);
+          relationship.id = nanoid();
 
-          relationships.forEach((r, i) => (r.id = i));
+          if (startField.unique) {
+            relationship.cardinality = Cardinality.ONE_TO_ONE;
+          } else {
+            relationship.cardinality = Cardinality.MANY_TO_ONE;
+          }
+
+          relationships.push(relationship);
         }
       });
     }
-  });
+  };
 
-  relationships.forEach((r, i) => (r.id = i));
+  if (Array.isArray(ast)) {
+    ast.forEach((e) => parseSingleStatement(e));
+  } else {
+    parseSingleStatement(ast);
+  }
 
   return { tables, relationships };
 }

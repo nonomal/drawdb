@@ -1,7 +1,14 @@
-import { dbToTypes } from "../../data/datatypes";
-import { parseDefault } from "./shared";
+import { appendViews } from "../views";
+import {
+  exportFieldComment,
+  getInlineFK,
+  parseDefault,
+  uniqueConstraintClause,
+} from "./shared";
 
-export function toSqlite(diagram) {
+import { dbToTypes } from "../../data/datatypes";
+
+function tablesToSqlite(diagram) {
   return diagram.tables
     .map((table) => {
       const inlineFK = getInlineFK(table, diagram);
@@ -10,7 +17,7 @@ export function toSqlite(diagram) {
       }CREATE TABLE IF NOT EXISTS "${table.name}" (\n${table.fields
         .map(
           (field) =>
-            `${field.comment === "" ? "" : `\t-- ${field.comment}\n`}\t"${
+            `${exportFieldComment(field.comment)}\t"${
               field.name
             }" ${field.type}${field.notNull ? " NOT NULL" : ""}${
               field.unique ? " UNIQUE" : ""
@@ -26,9 +33,9 @@ export function toSqlite(diagram) {
           ? `,\n\tPRIMARY KEY(${table.fields
               .filter((f) => f.primary)
               .map((f) => `"${f.name}"`)
-              .join(", ")})${inlineFK !== "" ? ",\n" : ""}`
+              .join(", ")})`
           : ""
-      }\t${inlineFK}\n);\n${table.indices
+      }${inlineFK !== "" ? ",\n" : ""}${inlineFK}${uniqueConstraintClause(table, (s) => `"${s}"`)}\n);\n${table.indices
         .map(
           (i) =>
             `\nCREATE ${i.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS "${
@@ -42,17 +49,6 @@ export function toSqlite(diagram) {
     .join("\n");
 }
 
-export function getInlineFK(table, obj) {
-  let fk = "";
-  obj.references.forEach((r) => {
-    if (fk !== "") return;
-    if (r.startTableId === table.id) {
-      fk = `FOREIGN KEY ("${table.fields[r.startFieldId].name}") REFERENCES "${
-        obj.tables[r.endTableId].name
-      }"("${
-        obj.tables[r.endTableId].fields[r.endFieldId].name
-      }")\n\tON UPDATE ${r.updateConstraint.toUpperCase()} ON DELETE ${r.deleteConstraint.toUpperCase()}`;
-    }
-  });
-  return fk;
+export function toSqlite(diagram) {
+  return appendViews(tablesToSqlite(diagram), diagram);
 }

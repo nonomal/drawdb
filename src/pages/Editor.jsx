@@ -6,35 +6,41 @@ import SelectContextProvider from "../context/SelectContext";
 import AreasContextProvider from "../context/AreasContext";
 import NotesContextProvider from "../context/NotesContext";
 import TypesContextProvider from "../context/TypesContext";
-import TasksContextProvider from "../context/TasksContext";
+import SettingsContextProvider from "../context/SettingsContext";
 import SaveStateContextProvider from "../context/SaveStateContext";
 import EnumsContextProvider from "../context/EnumsContext";
+import ViewsContextProvider from "../context/ViewsContext";
 import WorkSpace from "../components/Workspace";
+import { useThemedPage } from "../hooks";
 
 export default function Editor() {
+  useThemedPage();
+
   return (
-    <LayoutContextProvider>
-      <TransformContextProvider>
-        <UndoRedoContextProvider>
-          <SelectContextProvider>
-            <TasksContextProvider>
+    <SettingsContextProvider>
+      <LayoutContextProvider>
+        <TransformContextProvider>
+          <UndoRedoContextProvider>
+            <SelectContextProvider>
               <AreasContextProvider>
                 <NotesContextProvider>
                   <TypesContextProvider>
                     <EnumsContextProvider>
-                      <TablesContextProvider>
-                        <SaveStateContextProvider>
-                          <WorkSpace />
-                        </SaveStateContextProvider>
-                      </TablesContextProvider>
+                      <ViewsContextProvider>
+                        <TablesContextProvider>
+                          <SaveStateContextProvider>
+                            <WorkSpace />
+                          </SaveStateContextProvider>
+                        </TablesContextProvider>
+                      </ViewsContextProvider>
                     </EnumsContextProvider>
                   </TypesContextProvider>
                 </NotesContextProvider>
               </AreasContextProvider>
-            </TasksContextProvider>
-          </SelectContextProvider>
-        </UndoRedoContextProvider>
-      </TransformContextProvider>
-    </LayoutContextProvider>
+            </SelectContextProvider>
+          </UndoRedoContextProvider>
+        </TransformContextProvider>
+      </LayoutContextProvider>
+    </SettingsContextProvider>
   );
 }

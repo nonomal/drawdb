@@ -1,8 +1,8 @@
-import { createContext, useState } from "react";
-import { Action, ObjectType, defaultBlue } from "../data/constants";
-import { useUndoRedo, useTransform, useSelect } from "../hooks";
 import { Toast } from "@douyinfe/semi-ui";
+import { createContext, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Action, ObjectType, defaultBlue } from "../data/constants";
+import { useSelect, useTransform, useUndoRedo, useCollab } from "../hooks";
 
 export const AreasContext = createContext(null);
 
@@ -12,8 +12,11 @@ export default function AreasContextProvider({ children }) {
   const { transform } = useTransform();
   const { selectedElement, setSelectedElement } = useSelect();
   const { setUndoStack, setRedoStack } = useUndoRedo();
+  const { emitDelta, isApplyingRemoteRef } = useCollab();
+  const shouldEmit = () => !isApplyingRemoteRef?.current;
 
   const addArea = (data, addToHistory = true) => {
+    let created = data;
     if (data) {
       setAreas((prev) => {
         const temp = prev.slice();
@@ -23,18 +26,17 @@ export default function AreasContextProvider({ children }) {
     } else {
       const width = 200;
       const height = 200;
-      setAreas((prev) => [
-        ...prev,
-        {
-          id: prev.length,
-          name: `area_${prev.length}`,
-          x: transform.pan.x - width / 2,
-          y: transform.pan.y - height / 2,
-          width,
-          height,
-          color: defaultBlue,
-        },
-      ]);
+      created = {
+        id: areas.length,
+        name: `area_${areas.length}`,
+        x: transform.pan.x - width / 2,
+        y: transform.pan.y - height / 2,
+        width,
+        height,
+        color: defaultBlue,
+        locked: false,
+      };
+      setAreas((prev) => [...prev, { ...created, id: prev.length }]);
     }
     if (addToHistory) {
       setUndoStack((prev) => [
@@ -47,6 +49,14 @@ export default function AreasContextProvider({ children }) {
       ]);
       setRedoStack([]);
     }
+    if (shouldEmit() && created) {
+      emitDelta({
+        target: "area",
+        action: "create",
+        entityId: created.id,
+        data: [created],
+      });
+    }
   };
 
   const deleteArea = (id, addToHistory = true) => {
@@ -58,7 +68,7 @@ export default function AreasContextProvider({ children }) {
           action: Action.DELETE,
           element: ObjectType.AREA,
           data: areas[id],
-          message: t("delete_area", areas[id].name),
+          message: t("delete_area", { areaName: areas[id].name }),
         },
       ]);
       setRedoStack([]);
@@ -74,6 +84,14 @@ export default function AreasContextProvider({ children }) {
         open: false,
       }));
     }
+    if (shouldEmit()) {
+      emitDelta({
+        target: "area",
+        action: "delete",
+        entityId: id,
+        data: [id],
+      });
+    }
   };
 
   const updateArea = (id, values) => {
@@ -88,11 +106,26 @@ export default function AreasContextProvider({ children }) {
         return t;
       }),
     );
+    if (shouldEmit()) {
+      emitDelta({
+        target: "area",
+        action: "update",
+        entityId: id,
+        data: [id, values],
+      });
+    }
   };
 
   return (
     <AreasContext.Provider
-      value={{ areas, setAreas, updateArea, addArea, deleteArea }}
+      value={{
+        areas,
+        setAreas,
+        updateArea,
+        addArea,
+        deleteArea,
+        areasCount: areas.length,
+      }}
     >
       {children}
     </AreasContext.Provider>

@@ -1,3 +1,6 @@
+import { v4 as uuidv4 } from "uuid";
+import { Cardinality } from "../data/constants";
+
 export const template6 = {
   tables: [
     {
@@ -400,7 +403,7 @@ export const template6 = {
       endTableId: 0,
       endFieldId: 0,
       name: "enrollment_student_id_fk",
-      cardinality: "Many to one",
+      cardinality: Cardinality.MANY_TO_ONE,
       updateConstraint: "No action",
       deleteConstraint: "No action",
       id: 0,
@@ -411,7 +414,7 @@ export const template6 = {
       endTableId: 1,
       endFieldId: 0,
       name: "enrollment_course_id_fk",
-      cardinality: "Many to one",
+      cardinality: Cardinality.MANY_TO_ONE,
       updateConstraint: "No action",
       deleteConstraint: "No action",
       id: 1,
@@ -422,7 +425,7 @@ export const template6 = {
       endTableId: 4,
       endFieldId: 0,
       name: "instructors_dep_id_fk",
-      cardinality: "One to one",
+      cardinality: Cardinality.ONE_TO_ONE,
       updateConstraint: "No action",
       deleteConstraint: "No action",
       id: 2,
@@ -433,7 +436,7 @@ export const template6 = {
       endTableId: 4,
       endFieldId: 0,
       name: "courses_dep_id_fk",
-      cardinality: "One to one",
+      cardinality: Cardinality.ONE_TO_ONE,
       updateConstraint: "No action",
       deleteConstraint: "No action",
       id: 3,
@@ -444,7 +447,7 @@ export const template6 = {
       endTableId: 5,
       endFieldId: 0,
       name: "students_major_id_fk",
-      cardinality: "Many to one",
+      cardinality: Cardinality.MANY_TO_ONE,
       updateConstraint: "No action",
       deleteConstraint: "No action",
       id: 4,
@@ -457,4 +460,5 @@ export const template6 = {
   description:
     "A university schema designed to manage information about students, courses, instructors, and other aspects of university-related data.",
   custom: 0,
+  templateId: uuidv4(),
 };

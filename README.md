@@ -1,22 +1,25 @@
-<h3 align="center">
-    <img width="80" alt="drawdb logo" src="./src/assets/icon-dark.png">
-</h3>
+<div align="center">
+    <img width="64" alt="drawDB logo" src="./src/assets/icon-dark.png">
+    <h1>drawDB</h1>
+</div>
 
-<h3 align="center">Free, simple, and intuitive database design tool and SQL generator.</h3>
+<h3 align="center">Free, simple, and intuitive database schema editor and SQL generator.</h3>
 
-<p align="center">
-    <a href="https://drawdb.app/">drawDB</a>
-    ·  
-    <a href="https://discord.gg/BrjZgNrmR6">Discord</a>
-    ·  
-    <a href="https://x.com/drawDB_">X</a>
-</p>
+<div align="center" style="margin-bottom:12px;">
+    <a href="https://drawdb.app/" style="display: flex; align-items: center;">
+        <img src="https://img.shields.io/badge/Start%20building-grey" alt="drawDB"/>
+    </a>
+    <a href="https://discord.gg/BrjZgNrmR6" style="display: flex; align-items: center;">
+        <img src="https://img.shields.io/discord/1196658537208758412.svg?label=Join%20the%20Discord&logo=discord" alt="Discord"/>
+    </a>
+    <a href="https://x.com/drawDB_" style="display: flex; align-items: center;">
+        <img src="https://img.shields.io/badge/Follow%20us%20on%20X-blue?logo=X" alt="Follow us on X"/>
+    </a>
+</div>
 
-<h3 align="center"><img width="700" style="border-radius:5px;" alt="demo" src="drawdb.gif"></h3>
+<h3 align="center"><img width="700" style="border-radius:5px;" alt="drawDB screenshot demo" src="drawdb.png"></h3>
 
-## drawDB
-
-DrawDB is a robust and user-friendly database entity relationship (DBER) editor right in your browser. Build diagrams with a few clicks, export sql scripts, customize your editor, and more without creating an account. See the full set of features [here](https://drawdb.app/).
+DrawDB is a robust and user-friendly database entity relationship diagram (ERD) editor right in your browser. Build diagrams with a few clicks, export and import SQL scripts, generate migrations, customize your editor, and more without creating an account. See the full set of features on [here](https://drawdb.app/).
 
 ## Getting Started
 
@@ -45,4 +48,11 @@ docker build -t drawdb .
 docker run -p 3000:80 drawdb
 ```
 
-Set up the [server](https://github.com/drawdb-io/drawdb-server) and environment variables according to `.env.sample` for the survey and bug report forms.
+If you want to enable sharing, set up the [server](https://github.com/drawdb-io/drawdb-server) and environment variables according to `.env.sample`. This is optional unless you need to share files.
+
+## Contributing
+
+Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to contribute to this project.
+
+## Support
+- Join discussions: [Discord](https://discord.gg/BrjZgNrmR6)

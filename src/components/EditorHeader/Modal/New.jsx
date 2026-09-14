@@ -3,6 +3,7 @@ import { useSettings } from "../../../hooks";
 import { useLiveQuery } from "dexie-react-hooks";
 import Thumbnail from "../../Thumbnail";
 import { useTranslation } from "react-i18next";
+import { Slot } from "../../../context/ExtensionsContext";
 
 export default function New({ selectedTemplateId, setSelectedTemplateId }) {
   const { settings } = useSettings();
@@ -11,27 +12,30 @@ export default function New({ selectedTemplateId, setSelectedTemplateId }) {
 
   return (
     <div className="grid grid-cols-3 gap-2 overflow-auto px-1">
-      <div onClick={() => setSelectedTemplateId(0)}>
+      <div onClick={() => setSelectedTemplateId("blank")}>
         <div
           className={`rounded-md h-[180px] border-2 hover:border-dashed ${
-            selectedTemplateId === 0 ? "border-blue-400" : "border-zinc-400"
+            selectedTemplateId === "blank" ? "border-blue-400" : "border-zinc-400"
           }`}
         >
-          <Thumbnail i={0} diagram={{}} zoom={0.24} theme={settings.mode} />
+          <Thumbnail i="blank" diagram={{}} zoom={0.24} theme={settings.mode} />
         </div>
         <div className="text-center mt-1">{t("blank")}</div>
       </div>
-      {templates?.map((temp, i) => (
-        <div key={i} onClick={() => setSelectedTemplateId(temp.id)}>
+      {templates?.map((temp) => (
+        <div
+          key={temp.templateId}
+          onClick={() => setSelectedTemplateId(temp.templateId)}
+        >
           <div
             className={`rounded-md h-[180px] border-2 hover:border-dashed ${
-              selectedTemplateId === temp.id
+              selectedTemplateId === temp.templateId
                 ? "border-blue-400"
                 : "border-zinc-400"
             }`}
           >
             <Thumbnail
-              i={temp.id}
+              i={temp.templateId}
               diagram={temp}
               zoom={0.24}
               theme={settings.mode}
@@ -40,6 +44,7 @@ export default function New({ selectedTemplateId, setSelectedTemplateId }) {
           <div className="text-center mt-1">{temp.title}</div>
         </div>
       ))}
+      <Slot name="new-diagram-end" />
     </div>
   );
 }

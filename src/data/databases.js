@@ -3,6 +3,7 @@ import postgresImage from "../assets/postgres-icon.png";
 import sqliteImage from "../assets/sqlite-icon.png";
 import mariadbImage from "../assets/mariadb-icon.png";
 import mssqlImage from "../assets/mssql-icon.png";
+import oraclesqlImage from "../assets/oraclesql-icon.png";
 import i18n from "../i18n/i18n";
 import { DB } from "./constants";
 
@@ -13,6 +14,7 @@ export const databases = new Proxy(
       label: DB.MYSQL,
       image: mysqlImage,
       hasTypes: false,
+      hasUnsignedTypes: true,
     },
     [DB.POSTGRES]: {
       name: "PostgreSQL",
@@ -21,6 +23,7 @@ export const databases = new Proxy(
       hasTypes: true,
       hasEnums: true,
       hasArrays: true,
+      hasMaterializedViews: true,
     },
     [DB.SQLITE]: {
       name: "SQLite",
@@ -33,6 +36,7 @@ export const databases = new Proxy(
       label: DB.MARIADB,
       image: mariadbImage,
       hasTypes: false,
+      hasUnsignedTypes: true,
     },
     [DB.MSSQL]: {
       name: "MSSQL",
@@ -40,12 +44,23 @@ export const databases = new Proxy(
       image: mssqlImage,
       hasTypes: false,
     },
+    [DB.ORACLESQL]: {
+      name: "Oracle SQL",
+      label: DB.ORACLESQL,
+      image: oraclesqlImage,
+      hasTypes: false,
+      hasEnums: false,
+      hasArrays: false,
+      hasMaterializedViews: true,
+      beta: true,
+    },
     [DB.GENERIC]: {
       name: i18n.t("generic"),
       label: DB.GENERIC,
       image: null,
       description: i18n.t("generic_description"),
       hasTypes: true,
+      hasMaterializedViews: true,
     },
   },
   { get: (target, prop) => (prop in target ? target[prop] : {}) },

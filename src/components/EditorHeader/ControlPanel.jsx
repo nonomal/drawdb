@@ -1,15 +1,18 @@
-import { useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
+import { v4 as uuidv4 } from "uuid";
+import { Slot, useExtensions } from "../../context/ExtensionsContext";
+import { createPortal } from "react-dom";
 import {
   IconCaretdown,
   IconChevronRight,
-  IconChevronUp,
-  IconChevronDown,
+  IconChevronLeft,
   IconSaveStroked,
   IconUndo,
   IconRedo,
   IconEdit,
+  IconShareStroked,
 } from "@douyinfe/semi-icons";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useMatch, useParams } from "react-router-dom";
 import icon from "../../assets/icon_dark_64.png";
 import {
   Button,
@@ -18,17 +21,20 @@ import {
   InputNumber,
   Tooltip,
   Spin,
+  Tag,
   Toast,
   Popconfirm,
+  Typography,
+  Modal as SemiModal,
 } from "@douyinfe/semi-ui";
 import { toPng, toJpeg, toSvg } from "html-to-image";
-import { saveAs } from "file-saver";
 import {
   jsonToMySQL,
   jsonToPostgreSQL,
   jsonToSQLite,
   jsonToMariaDB,
   jsonToSQLServer,
+  jsonToOracleSQL,
 } from "../../utils/exportSQL/generic";
 import {
   ObjectType,
@@ -38,11 +44,20 @@ import {
   MODAL,
   SIDESHEET,
   DB,
+  IMPORT_FROM,
+  noteWidth,
+  pngExportPixelRatio,
+  keyboardPanStep,
 } from "../../data/constants";
 import jsPDF from "jspdf";
 import { useHotkeys } from "react-hotkeys-hook";
 import { Validator } from "jsonschema";
-import { areaSchema, noteSchema, tableSchema } from "../../data/schemas";
+import {
+  areaSchema,
+  noteSchema,
+  tableSchema,
+  viewSchema,
+} from "../../data/schemas";
 import { db } from "../../data/db";
 import {
   useLayout,
@@ -56,35 +71,77 @@ import {
   useNotes,
   useAreas,
   useEnums,
+  useViews,
   useFullscreen,
+  useNavigateWithParams,
 } from "../../hooks";
 import { enterFullscreen, exitFullscreen } from "../../utils/fullscreen";
 import { dataURItoBlob } from "../../utils/utils";
-import { IconAddArea, IconAddNote, IconAddTable } from "../../icons";
+import {
+  IconAddArea,
+  IconAddNote,
+  IconAddTable,
+  IconAddView,
+} from "../../icons";
 import LayoutDropdown from "./LayoutDropdown";
 import Sidesheet from "./SideSheet/Sidesheet";
 import Modal from "./Modal/Modal";
 import { useTranslation } from "react-i18next";
 import { exportSQL } from "../../utils/exportSQL";
 import { databases } from "../../data/databases";
+import { jsonToMermaid } from "../../utils/exportAs/mermaid";
+import { isRtl } from "../../i18n/utils/rtl";
+import { jsonToDocumentation } from "../../utils/exportAs/documentation";
+import { IdContext } from "../Workspace";
+import { socials } from "../../data/socials";
+import { toDBML } from "../../utils/exportAs/dbml";
+import { applyDiagramPlan } from "../../utils/dbml/applyPlan";
+import { diffDiagram } from "../../utils/dbml/diff";
+import { exportSavedData } from "../../utils/exportSavedData";
+import { nanoid } from "nanoid";
+import { getTableHeight } from "../../utils/utils";
+import { getViewHeight, resolveViewColumns } from "../../utils/views";
+import { autoArrange } from "../../utils/autoArrange";
+import { findAutoFKRelationships } from "../../utils/autoRelationships";
+import { deleteFromCache, STORAGE_KEY } from "../../utils/cache";
+import { DateTime } from "luxon";
+import ConfigureCustomTypes from "./ConfigureCustomTypes";
+import { useDiagramList } from "./Modal/Open/hooks/useDiagramList";
+import { mergeDiagrams, sortDiagrams } from "./Modal/Open/diagram";
+
+const EDITOR_HOTKEY = {
+  preventDefault: true,
+  ignoreEventWhen: (e) => Boolean(e.target?.closest?.(".monaco-editor")),
+};
 
 export default function ControlPanel({
-  diagramId,
-  setDiagramId,
   title,
   setTitle,
   lastSaved,
+  setLastSaved,
+  toolbarContainer,
 }) {
+  const { id: diagramId } = useParams();
+
   const [modal, setModal] = useState(MODAL.NONE);
   const [sidesheet, setSidesheet] = useState(SIDESHEET.NONE);
-  const [prevTitle, setPrevTitle] = useState(title);
   const [showEditName, setShowEditName] = useState(false);
+  const [showAutoConnectModal, setShowAutoConnectModal] = useState(false);
   const [importDb, setImportDb] = useState("");
   const [exportData, setExportData] = useState({
     data: null,
     filename: `${title}_${new Date().toISOString()}`,
     extension: "",
   });
+
+  const openExportModal = (modalType) => {
+    setExportData((prev) => ({
+      ...prev,
+      filename: `${title}_${new Date().toISOString()}`,
+    }));
+    setModal(modalType);
+  };
+  const [importFrom, setImportFrom] = useState(IMPORT_FROM.JSON);
   const { saveState, setSaveState } = useSaveState();
   const { layout, setLayout } = useLayout();
   const { settings, setSettings } = useSettings();
@@ -100,46 +157,91 @@ export default function ControlPanel({
     setRelationships,
     addRelationship,
     deleteRelationship,
+    updateRelationship,
     database,
   } = useDiagram();
   const { enums, setEnums, deleteEnum, addEnum, updateEnum } = useEnums();
   const { types, addType, deleteType, updateType, setTypes } = useTypes();
+  const { views, setViews, addView, updateView, deleteView } = useViews();
   const { notes, setNotes, updateNote, addNote, deleteNote } = useNotes();
   const { areas, setAreas, updateArea, addArea, deleteArea } = useAreas();
   const { undoStack, redoStack, setUndoStack, setRedoStack } = useUndoRedo();
   const { selectedElement, setSelectedElement } = useSelect();
   const { transform, setTransform } = useTransform();
-  const { t } = useTranslation();
-  const navigate = useNavigate();
+  const { t, i18n } = useTranslation();
+  const { version, gistId, setGistId } = useContext(IdContext);
+  const isTemplate = useMatch("/editor/templates/:id");
+  const navigate = useNavigateWithParams();
+  const extensions = useExtensions();
 
-  const invertLayout = (component) =>
-    setLayout((prev) => ({ ...prev, [component]: !prev[component] }));
+  const swapDbmlSnapshot = (entry) => {
+    const current = { tables, relationships, enums };
+    applyDiagramPlan(diffDiagram(current, entry.data.snapshot), {
+      addTable,
+      updateTable,
+      updateField,
+      deleteTable,
+      addRelationship,
+      updateRelationship,
+      deleteRelationship,
+      setEnums,
+    });
+    return { ...entry, data: { snapshot: current } };
+  };
 
   const undo = () => {
     if (undoStack.length === 0) return;
     const a = undoStack[undoStack.length - 1];
     setUndoStack((prev) => prev.filter((_, i) => i !== prev.length - 1));
+
+    if (a.bulk) {
+      if (a.element === ObjectType.RELATIONSHIP && a.action === Action.ADD) {
+        const idsToDelete = new Set((a.relationships || []).map((r) => r.id));
+        setRelationships((prev) => prev.filter((r) => !idsToDelete.has(r.id)));
+        setRedoStack((prev) => [...prev, a]);
+        return;
+      }
+      for (const element of a.elements) {
+        if (element.type === ObjectType.TABLE) {
+          updateTable(element.id, element.undo);
+        } else if (element.type === ObjectType.AREA) {
+          updateArea(element.id, element.undo);
+        } else if (element.type === ObjectType.NOTE) {
+          updateNote(element.id, element.undo);
+        } else if (element.type === ObjectType.VIEW) {
+          updateView(element.id, element.undo);
+        }
+      }
+      setRedoStack((prev) => [...prev, a]);
+      return;
+    }
+
+    if (a.element === ObjectType.DBML) {
+      setRedoStack((prev) => [...prev, swapDbmlSnapshot(a)]);
+      return;
+    }
+
     if (a.action === Action.ADD) {
       if (a.element === ObjectType.TABLE) {
-        deleteTable(tables[tables.length - 1].id, false);
+        deleteTable(a.data.table.id, false);
       } else if (a.element === ObjectType.AREA) {
         deleteArea(areas[areas.length - 1].id, false);
       } else if (a.element === ObjectType.NOTE) {
         deleteNote(notes[notes.length - 1].id, false);
       } else if (a.element === ObjectType.RELATIONSHIP) {
-        deleteRelationship(a.data.id, false);
+        deleteRelationship(a.data.relationship.id, false);
       } else if (a.element === ObjectType.TYPE) {
-        deleteType(types.length - 1, false);
+        deleteType(a.data.type.id, false);
       } else if (a.element === ObjectType.ENUM) {
-        deleteEnum(enums.length - 1, false);
+        deleteEnum(a.data.enum.id, false);
+      } else if (a.element === ObjectType.VIEW) {
+        deleteView(a.data.view.id, false);
       }
       setRedoStack((prev) => [...prev, a]);
     } else if (a.action === Action.MOVE) {
       if (a.element === ObjectType.TABLE) {
-        setRedoStack((prev) => [
-          ...prev,
-          { ...a, x: tables[a.id].x, y: tables[a.id].y },
-        ]);
+        const { x, y } = tables.find((t) => t.id === a.id);
+        setRedoStack((prev) => [...prev, { ...a, x, y }]);
         updateTable(a.id, { x: a.x, y: a.y });
       } else if (a.element === ObjectType.AREA) {
         setRedoStack((prev) => [
@@ -157,7 +259,7 @@ export default function ControlPanel({
     } else if (a.action === Action.DELETE) {
       if (a.element === ObjectType.TABLE) {
         a.data.relationship.forEach((x) => addRelationship(x, false));
-        addTable(a.data.table, false);
+        addTable(a.data, false);
       } else if (a.element === ObjectType.RELATIONSHIP) {
         addRelationship(a.data, false);
       } else if (a.element === ObjectType.NOTE) {
@@ -165,9 +267,11 @@ export default function ControlPanel({
       } else if (a.element === ObjectType.AREA) {
         addArea(a.data, false);
       } else if (a.element === ObjectType.TYPE) {
-        addType({ id: a.id, ...a.data }, false);
+        addType(a.data, false);
       } else if (a.element === ObjectType.ENUM) {
-        addEnum({ id: a.id, ...a.data }, false);
+        addEnum(a.data, false);
+      } else if (a.element === ObjectType.VIEW) {
+        addView(a.data, false);
       }
       setRedoStack((prev) => [...prev, a]);
     } else if (a.action === Action.EDIT) {
@@ -176,6 +280,7 @@ export default function ControlPanel({
       } else if (a.element === ObjectType.NOTE) {
         updateNote(a.nid, a.undo);
       } else if (a.element === ObjectType.TABLE) {
+        const table = tables.find((t) => t.id === a.tid);
         if (a.component === "field") {
           updateField(a.tid, a.fid, a.undo);
         } else if (a.component === "field_delete") {
@@ -184,65 +289,24 @@ export default function ControlPanel({
             a.data.relationship.forEach((r) => {
               temp.splice(r.id, 0, r);
             });
-            temp = temp.map((e, i) => {
-              const recoveredRel = a.data.relationship.find(
-                (x) =>
-                  (x.startTableId === e.startTableId &&
-                    x.startFieldId === e.startFieldId) ||
-                  (x.endTableId === e.endTableId &&
-                    x.endFieldId === a.endFieldId),
-              );
-              if (
-                e.startTableId === a.tid &&
-                e.startFieldId >= a.data.field.id &&
-                !recoveredRel
-              ) {
-                return {
-                  ...e,
-                  id: i,
-                  startFieldId: e.startFieldId + 1,
-                };
-              }
-              if (
-                e.endTableId === a.tid &&
-                e.endFieldId >= a.data.field.id &&
-                !recoveredRel
-              ) {
-                return {
-                  ...e,
-                  id: i,
-                  endFieldId: e.endFieldId + 1,
-                };
-              }
-              return { ...e, id: i };
-            });
             return temp;
           });
-          setTables((prev) =>
-            prev.map((t) => {
-              if (t.id === a.tid) {
-                const temp = t.fields.slice();
-                temp.splice(a.data.field.id, 0, a.data.field);
-                return { ...t, fields: temp.map((t, i) => ({ ...t, id: i })) };
-              }
-              return t;
-            }),
-          );
+          const updatedFields = table.fields.slice();
+          updatedFields.splice(a.data.index, 0, a.data.field);
+          updateTable(a.tid, { fields: updatedFields });
         } else if (a.component === "field_add") {
           updateTable(a.tid, {
-            fields: tables[a.tid].fields
-              .filter((e) => e.id !== tables[a.tid].fields.length - 1)
-              .map((t, i) => ({ ...t, id: i })),
+            fields: table.fields.filter((e) => e.id !== a.fid),
           });
         } else if (a.component === "index_add") {
           updateTable(a.tid, {
-            indices: tables[a.tid].indices
-              .filter((e) => e.id !== tables[a.tid].indices.length - 1)
+            indices: table.indices
+              .filter((e) => e.id !== table.indices.length - 1)
               .map((t, i) => ({ ...t, id: i })),
           });
         } else if (a.component === "index") {
           updateTable(a.tid, {
-            indices: tables[a.tid].indices.map((index) =>
+            indices: table.indices.map((index) =>
               index.id === a.iid
                 ? {
                     ...index,
@@ -252,31 +316,52 @@ export default function ControlPanel({
             ),
           });
         } else if (a.component === "index_delete") {
-          setTables((prev) =>
-            prev.map((table) => {
-              if (table.id === a.tid) {
-                const temp = table.indices.slice();
-                temp.splice(a.data.id, 0, a.data);
-                return {
-                  ...table,
-                  indices: temp.map((t, i) => ({ ...t, id: i })),
-                };
-              }
-              return table;
-            }),
-          );
+          const updatedIndices = table.indices.slice();
+          updatedIndices.splice(a.data.id, 0, a.data);
+          updateTable(a.tid, {
+            indices: updatedIndices.map((t, i) => ({ ...t, id: i })),
+          });
+        } else if (a.component === "unique_constraint_add") {
+          const constraints = table.uniqueConstraints || [];
+          updateTable(a.tid, {
+            uniqueConstraints: constraints
+              .filter((e) => e.id !== constraints.length - 1)
+              .map((t, i) => ({ ...t, id: i })),
+          });
+        } else if (a.component === "unique_constraint") {
+          updateTable(a.tid, {
+            uniqueConstraints: (table.uniqueConstraints || []).map(
+              (constraint) =>
+                constraint.id === a.cid
+                  ? {
+                      ...constraint,
+                      ...a.undo,
+                    }
+                  : constraint,
+            ),
+          });
+        } else if (a.component === "unique_constraint_delete") {
+          const updatedConstraints = (table.uniqueConstraints || []).slice();
+          updatedConstraints.splice(a.data.id, 0, a.data);
+          updateTable(a.tid, {
+            uniqueConstraints: updatedConstraints.map((t, i) => ({
+              ...t,
+              id: i,
+            })),
+          });
         } else if (a.component === "self") {
           updateTable(a.tid, a.undo);
         }
       } else if (a.element === ObjectType.RELATIONSHIP) {
-        setRelationships((prev) =>
-          prev.map((e, idx) => (idx === a.rid ? { ...e, ...a.undo } : e)),
-        );
+        updateRelationship(a.rid, a.undo);
       } else if (a.element === ObjectType.TYPE) {
         if (a.component === "field_add") {
+          const type = types.find((t, i) =>
+            typeof a.tid === "number" ? i === a.tid : t.id === a.tid,
+          );
           updateType(a.tid, {
-            fields: types[a.tid].fields.filter(
-              (_, i) => i !== types[a.tid].fields.length - 1,
+            fields: type.fields.filter((f, i) =>
+              f.id ? f.id !== a.data.field.id : i !== type.fields.length - 1,
             ),
           });
         }
@@ -299,16 +384,26 @@ export default function ControlPanel({
           );
         } else if (a.component === "self") {
           updateType(a.tid, a.undo);
+          if (a.updatedFields) {
+            if (a.undo.name) {
+              a.updatedFields.forEach((x) =>
+                updateField(x.tid, x.fid, { type: a.undo.name.toUpperCase() }),
+              );
+            }
+          }
         }
+      } else if (a.element === ObjectType.VIEW) {
+        updateView(a.vid, a.undo);
       } else if (a.element === ObjectType.ENUM) {
         updateEnum(a.id, a.undo);
+        if (a.updatedFields) {
+          if (a.undo.name) {
+            a.updatedFields.forEach((x) =>
+              updateField(x.tid, x.fid, { type: a.undo.name.toUpperCase() }),
+            );
+          }
+        }
       }
-      setRedoStack((prev) => [...prev, a]);
-    } else if (a.action === Action.PAN) {
-      setTransform((prev) => ({
-        ...prev,
-        pan: a.undo,
-      }));
       setRedoStack((prev) => [...prev, a]);
     }
   };
@@ -317,9 +412,36 @@ export default function ControlPanel({
     if (redoStack.length === 0) return;
     const a = redoStack[redoStack.length - 1];
     setRedoStack((prev) => prev.filter((e, i) => i !== prev.length - 1));
+
+    if (a.bulk) {
+      if (a.element === ObjectType.RELATIONSHIP && a.action === Action.ADD) {
+        setRelationships((prev) => [...prev, ...(a.relationships || [])]);
+        setUndoStack((prev) => [...prev, a]);
+        return;
+      }
+      for (const element of a.elements) {
+        if (element.type === ObjectType.TABLE) {
+          updateTable(element.id, element.redo);
+        } else if (element.type === ObjectType.AREA) {
+          updateArea(element.id, element.redo);
+        } else if (element.type === ObjectType.NOTE) {
+          updateNote(element.id, element.redo);
+        } else if (element.type === ObjectType.VIEW) {
+          updateView(element.id, element.redo);
+        }
+      }
+      setUndoStack((prev) => [...prev, a]);
+      return;
+    }
+
+    if (a.element === ObjectType.DBML) {
+      setUndoStack((prev) => [...prev, swapDbmlSnapshot(a)]);
+      return;
+    }
+
     if (a.action === Action.ADD) {
       if (a.element === ObjectType.TABLE) {
-        addTable(null, false);
+        addTable(a.data, false);
       } else if (a.element === ObjectType.AREA) {
         addArea(null, false);
       } else if (a.element === ObjectType.NOTE) {
@@ -327,17 +449,17 @@ export default function ControlPanel({
       } else if (a.element === ObjectType.RELATIONSHIP) {
         addRelationship(a.data, false);
       } else if (a.element === ObjectType.TYPE) {
-        addType(null, false);
+        addType(a.data, false);
       } else if (a.element === ObjectType.ENUM) {
-        addEnum(null, false);
+        addEnum(a.data, false);
+      } else if (a.element === ObjectType.VIEW) {
+        addView(a.data, false);
       }
       setUndoStack((prev) => [...prev, a]);
     } else if (a.action === Action.MOVE) {
       if (a.element === ObjectType.TABLE) {
-        setUndoStack((prev) => [
-          ...prev,
-          { ...a, x: tables[a.id].x, y: tables[a.id].y },
-        ]);
+        const { x, y } = tables.find((t) => t.id == a.id);
+        setUndoStack((prev) => [...prev, { ...a, x, y }]);
         updateTable(a.id, { x: a.x, y: a.y });
       } else if (a.element === ObjectType.AREA) {
         setUndoStack((prev) => [
@@ -356,15 +478,17 @@ export default function ControlPanel({
       if (a.element === ObjectType.TABLE) {
         deleteTable(a.data.table.id, false);
       } else if (a.element === ObjectType.RELATIONSHIP) {
-        deleteRelationship(a.data.id, false);
+        deleteRelationship(a.data.relationship.id, false);
       } else if (a.element === ObjectType.NOTE) {
         deleteNote(a.data.id, false);
       } else if (a.element === ObjectType.AREA) {
         deleteArea(a.data.id, false);
       } else if (a.element === ObjectType.TYPE) {
-        deleteType(a.id, false);
+        deleteType(a.data.type.id, false);
       } else if (a.element === ObjectType.ENUM) {
-        deleteEnum(a.id, false);
+        deleteEnum(a.data.enum.id, false);
+      } else if (a.element === ObjectType.VIEW) {
+        deleteView(a.data.view.id, false);
       }
       setUndoStack((prev) => [...prev, a]);
     } else if (a.action === Action.EDIT) {
@@ -373,6 +497,7 @@ export default function ControlPanel({
       } else if (a.element === ObjectType.NOTE) {
         updateNote(a.nid, a.redo);
       } else if (a.element === ObjectType.TABLE) {
+        const table = tables.find((t) => t.id === a.tid);
         if (a.component === "field") {
           updateField(a.tid, a.fid, a.redo);
         } else if (a.component === "field_delete") {
@@ -380,7 +505,7 @@ export default function ControlPanel({
         } else if (a.component === "field_add") {
           updateTable(a.tid, {
             fields: [
-              ...tables[a.tid].fields,
+              ...table.fields,
               {
                 name: "",
                 type: "",
@@ -391,32 +516,24 @@ export default function ControlPanel({
                 notNull: false,
                 increment: false,
                 comment: "",
-                id: tables[a.tid].fields.length,
+                id: nanoid(),
               },
             ],
           });
         } else if (a.component === "index_add") {
-          setTables((prev) =>
-            prev.map((table) => {
-              if (table.id === a.tid) {
-                return {
-                  ...table,
-                  indices: [
-                    ...table.indices,
-                    {
-                      id: table.indices.length,
-                      name: `index_${table.indices.length}`,
-                      fields: [],
-                    },
-                  ],
-                };
-              }
-              return table;
-            }),
-          );
+          updateTable(a.tid, {
+            indices: [
+              ...table.indices,
+              {
+                id: table.indices.length,
+                name: `index_${table.indices.length}`,
+                fields: [],
+              },
+            ],
+          });
         } else if (a.component === "index") {
           updateTable(a.tid, {
-            indices: tables[a.tid].indices.map((index) =>
+            indices: table.indices.map((index) =>
               index.id === a.iid
                 ? {
                     ...index,
@@ -427,7 +544,37 @@ export default function ControlPanel({
           });
         } else if (a.component === "index_delete") {
           updateTable(a.tid, {
-            indices: tables[a.tid].indices
+            indices: table.indices
+              .filter((e) => e.id !== a.data.id)
+              .map((t, i) => ({ ...t, id: i })),
+          });
+        } else if (a.component === "unique_constraint_add") {
+          const constraints = table.uniqueConstraints || [];
+          updateTable(a.tid, {
+            uniqueConstraints: [
+              ...constraints,
+              {
+                id: constraints.length,
+                name: `${table.name}_unique_${constraints.length}`,
+                fields: [],
+              },
+            ],
+          });
+        } else if (a.component === "unique_constraint") {
+          updateTable(a.tid, {
+            uniqueConstraints: (table.uniqueConstraints || []).map(
+              (constraint) =>
+                constraint.id === a.cid
+                  ? {
+                      ...constraint,
+                      ...a.redo,
+                    }
+                  : constraint,
+            ),
+          });
+        } else if (a.component === "unique_constraint_delete") {
+          updateTable(a.tid, {
+            uniqueConstraints: (table.uniqueConstraints || [])
               .filter((e) => e.id !== a.data.id)
               .map((t, i) => ({ ...t, id: i })),
           });
@@ -435,19 +582,14 @@ export default function ControlPanel({
           updateTable(a.tid, a.redo, false);
         }
       } else if (a.element === ObjectType.RELATIONSHIP) {
-        setRelationships((prev) =>
-          prev.map((e, idx) => (idx === a.rid ? { ...e, ...a.redo } : e)),
-        );
+        updateRelationship(a.rid, a.redo);
       } else if (a.element === ObjectType.TYPE) {
         if (a.component === "field_add") {
+          const type = types.find((t, i) =>
+            typeof a.tid === "number" ? i === a.tid : t.id === a.tid,
+          );
           updateType(a.tid, {
-            fields: [
-              ...types[a.tid].fields,
-              {
-                name: "",
-                type: "",
-              },
-            ],
+            fields: [...type.fields, a.data.field],
           });
         } else if (a.component === "field") {
           updateType(a.tid, {
@@ -461,16 +603,26 @@ export default function ControlPanel({
           });
         } else if (a.component === "self") {
           updateType(a.tid, a.redo);
+          if (a.updatedFields) {
+            if (a.redo.name) {
+              a.updatedFields.forEach((x) =>
+                updateField(x.tid, x.fid, { type: a.redo.name.toUpperCase() }),
+              );
+            }
+          }
         }
+      } else if (a.element === ObjectType.VIEW) {
+        updateView(a.vid, a.redo);
       } else if (a.element === ObjectType.ENUM) {
         updateEnum(a.id, a.redo);
+        if (a.updatedFields) {
+          if (a.redo.name) {
+            a.updatedFields.forEach((x) =>
+              updateField(x.tid, x.fid, { type: a.redo.name.toUpperCase() }),
+            );
+          }
+        }
       }
-      setUndoStack((prev) => [...prev, a]);
-    } else if (a.action === Action.PAN) {
-      setTransform((prev) => ({
-        ...prev,
-        pan: a.redo,
-      }));
       setUndoStack((prev) => [...prev, a]);
     }
   };
@@ -478,10 +630,24 @@ export default function ControlPanel({
   const fileImport = () => setModal(MODAL.IMPORT);
   const viewGrid = () =>
     setSettings((prev) => ({ ...prev, showGrid: !prev.showGrid }));
+  const snapToGrid = () =>
+    setSettings((prev) => ({ ...prev, snapToGrid: !prev.snapToGrid }));
   const zoomIn = () =>
     setTransform((prev) => ({ ...prev, zoom: prev.zoom * 1.2 }));
   const zoomOut = () =>
     setTransform((prev) => ({ ...prev, zoom: prev.zoom / 1.2 }));
+  const panBy = (dx, dy) =>
+    setTransform((prev) => ({
+      ...prev,
+      pan: {
+        x: prev.pan.x + dx / prev.zoom,
+        y: prev.pan.y + dy / prev.zoom,
+      },
+    }));
+  const panLeft = () => panBy(-keyboardPanStep, 0);
+  const panRight = () => panBy(keyboardPanStep, 0);
+  const panUp = () => panBy(0, -keyboardPanStep);
+  const panDown = () => panBy(0, keyboardPanStep);
   const viewStrictMode = () => {
     setSettings((prev) => ({ ...prev, strictMode: !prev.strictMode }));
   };
@@ -492,7 +658,9 @@ export default function ControlPanel({
     }));
   };
   const copyAsImage = () => {
-    toPng(document.getElementById("canvas")).then(function (dataUrl) {
+    toPng(document.getElementById("canvas"), {
+      pixelRatio: pngExportPixelRatio,
+    }).then(function (dataUrl) {
       const blob = dataURItoBlob(dataUrl);
       navigator.clipboard
         .write([new ClipboardItem({ "image/png": blob })])
@@ -506,21 +674,142 @@ export default function ControlPanel({
   };
   const resetView = () =>
     setTransform((prev) => ({ ...prev, zoom: 1, pan: { x: 0, y: 0 } }));
-  const fitWindow = () => {
-    const diagram = document.getElementById("diagram").getBoundingClientRect();
+  const fitWindow = () => fitToView(tables);
+  const fitToView = (tablesToFit) => {
     const canvas = document.getElementById("canvas").getBoundingClientRect();
 
-    const scaleX = canvas.width / diagram.width;
-    const scaleY = canvas.height / diagram.height;
-    const scale = Math.min(scaleX, scaleY);
-    const translateX = canvas.left;
-    const translateY = canvas.top;
+    const minMaxXY = {
+      minX: Infinity,
+      minY: Infinity,
+      maxX: -Infinity,
+      maxY: -Infinity,
+    };
+
+    tablesToFit.forEach((table) => {
+      minMaxXY.minX = Math.min(minMaxXY.minX, table.x);
+      minMaxXY.minY = Math.min(minMaxXY.minY, table.y);
+      minMaxXY.maxX = Math.max(minMaxXY.maxX, table.x + settings.tableWidth);
+      minMaxXY.maxY = Math.max(
+        minMaxXY.maxY,
+        table.y +
+          getTableHeight(
+            table,
+            settings.tableWidth,
+            settings.showComments,
+            relationships,
+          ),
+      );
+    });
+
+    views.forEach((view) => {
+      minMaxXY.minX = Math.min(minMaxXY.minX, view.x);
+      minMaxXY.minY = Math.min(minMaxXY.minY, view.y);
+      minMaxXY.maxX = Math.max(minMaxXY.maxX, view.x + settings.tableWidth);
+      minMaxXY.maxY = Math.max(
+        minMaxXY.maxY,
+        view.y +
+          getViewHeight(
+            view,
+            resolveViewColumns(view, tables),
+            settings.tableWidth,
+            settings.showComments,
+          ),
+      );
+    });
+
+    areas.forEach((area) => {
+      minMaxXY.minX = Math.min(minMaxXY.minX, area.x);
+      minMaxXY.minY = Math.min(minMaxXY.minY, area.y);
+      minMaxXY.maxX = Math.max(minMaxXY.maxX, area.x + area.width);
+      minMaxXY.maxY = Math.max(minMaxXY.maxY, area.y + area.height);
+    });
+
+    notes.forEach((note) => {
+      minMaxXY.minX = Math.min(minMaxXY.minX, note.x);
+      minMaxXY.minY = Math.min(minMaxXY.minY, note.y);
+      minMaxXY.maxX = Math.max(
+        minMaxXY.maxX,
+        note.x + (note.width ?? noteWidth),
+      );
+      minMaxXY.maxY = Math.max(minMaxXY.maxY, note.y + note.height);
+    });
+
+    const padding = 10;
+    const width = minMaxXY.maxX - minMaxXY.minX + padding;
+    const height = minMaxXY.maxY - minMaxXY.minY + padding;
+
+    const scaleX = canvas.width / width;
+    const scaleY = canvas.height / height;
+    // Making sure the scale is a multiple of 0.05
+    const scale = Math.floor(Math.min(scaleX, scaleY) * 20) / 20;
+
+    const centerX = (minMaxXY.minX + minMaxXY.maxX) / 2;
+    const centerY = (minMaxXY.minY + minMaxXY.maxY) / 2;
 
     setTransform((prev) => ({
       ...prev,
-      zoom: scale - 0.01,
-      pan: { x: translateX, y: translateY },
+      zoom: scale,
+      pan: { x: centerX, y: centerY },
     }));
+  };
+  const autoArrangeTables = () => {
+    const positions = autoArrange(tables, relationships, settings);
+    const positionById = new Map(positions.map((p) => [p.id, p]));
+
+    const elements = [];
+    const arrangedTables = tables.map((table) => {
+      const pos = positionById.get(table.id);
+      if (!pos || (pos.x === table.x && pos.y === table.y)) return table;
+      elements.push({
+        id: table.id,
+        type: ObjectType.TABLE,
+        undo: { x: table.x, y: table.y },
+        redo: { x: pos.x, y: pos.y },
+      });
+      return { ...table, x: pos.x, y: pos.y };
+    });
+
+    if (elements.length === 0) return;
+
+    for (const element of elements) {
+      updateTable(element.id, element.redo);
+    }
+    setUndoStack((prev) => [
+      ...prev,
+      {
+        action: Action.MOVE,
+        bulk: true,
+        message: t("auto_arrange"),
+        elements,
+      },
+    ]);
+    setRedoStack([]);
+    fitToView(arrangedTables);
+  };
+  const autoConnectFKs = () => {
+    if (layout.readOnly) return;
+    setShowAutoConnectModal(true);
+  };
+  const confirmAutoConnectFKs = () => {
+    setShowAutoConnectModal(false);
+    const newRels = findAutoFKRelationships(tables, relationships);
+    if (newRels.length === 0) {
+      Toast.info(t("all_relations_already_connected"));
+      return;
+    }
+    setRelationships((prev) => [...prev, ...newRels]);
+    setUndoStack((prev) => [
+      ...prev,
+      {
+        action: Action.ADD,
+        element: ObjectType.RELATIONSHIP,
+        bulk: true,
+        message: t("auto_connect_fk"),
+        relationships: newRels,
+      },
+    ]);
+    setRedoStack([]);
+    Toast.success(t("auto_connect_fk_success", { count: newRels.length }));
   };
   const edit = () => {
     if (selectedElement.element === ObjectType.TABLE) {
@@ -539,6 +828,20 @@ export default function ControlPanel({
         document
           .getElementById(`scroll_table_${selectedElement.id}`)
           .scrollIntoView({ behavior: "smooth" });
+      }
+    } else if (selectedElement.element === ObjectType.VIEW) {
+      if (!layout.sidebar) {
+        setSelectedElement((prev) => ({ ...prev, open: true }));
+      } else {
+        setSelectedElement((prev) => ({
+          ...prev,
+          open: true,
+          currentTab: Tab.VIEWS,
+        }));
+        if (selectedElement.currentTab !== Tab.VIEWS) return;
+        document
+          .getElementById(`scroll_view_${selectedElement.id}`)
+          ?.scrollIntoView({ behavior: "smooth" });
       }
     } else if (selectedElement.element === ObjectType.AREA) {
       if (layout.sidebar) {
@@ -578,6 +881,9 @@ export default function ControlPanel({
     }
   };
   const del = () => {
+    if (layout.readOnly) {
+      return;
+    }
     switch (selectedElement.element) {
       case ObjectType.TABLE:
         deleteTable(selectedElement.id);
@@ -588,20 +894,30 @@ export default function ControlPanel({
       case ObjectType.AREA:
         deleteArea(selectedElement.id);
         break;
+      case ObjectType.VIEW:
+        deleteView(selectedElement.id);
+        break;
       default:
         break;
     }
   };
   const duplicate = () => {
+    if (layout.readOnly) {
+      return;
+    }
     switch (selectedElement.element) {
-      case ObjectType.TABLE:
+      case ObjectType.TABLE: {
+        const copiedTable = tables.find((t) => t.id === selectedElement.id);
         addTable({
-          ...tables[selectedElement.id],
-          x: tables[selectedElement.id].x + 20,
-          y: tables[selectedElement.id].y + 20,
-          id: tables.length,
+          table: {
+            ...copiedTable,
+            x: copiedTable.x + 20,
+            y: copiedTable.y + 20,
+            id: nanoid(),
+          },
         });
         break;
+      }
       case ObjectType.NOTE:
         addNote({
           ...notes[selectedElement.id],
@@ -618,6 +934,25 @@ export default function ControlPanel({
           id: areas.length,
         });
         break;
+      case ObjectType.VIEW: {
+        const copiedView = views.find((v) => v.id === selectedElement.id);
+        addView({
+          view: {
+            ...copiedView,
+            x: copiedView.x + 20,
+            y: copiedView.y + 20,
+            id: nanoid(),
+            columns: copiedView.columns.map((c) => ({ ...c, id: nanoid() })),
+            joins: copiedView.joins.map((j) => ({ ...j, id: nanoid() })),
+            conditions: copiedView.conditions.map((c) => ({
+              ...c,
+              id: nanoid(),
+            })),
+          },
+          index: views.length,
+        });
+        break;
+      }
       default:
         break;
     }
@@ -626,7 +961,9 @@ export default function ControlPanel({
     switch (selectedElement.element) {
       case ObjectType.TABLE:
         navigator.clipboard
-          .writeText(JSON.stringify({ ...tables[selectedElement.id] }))
+          .writeText(
+            JSON.stringify(tables.find((t) => t.id === selectedElement.id)),
+          )
           .catch(() => Toast.error(t("oops_smth_went_wrong")));
         break;
       case ObjectType.NOTE:
@@ -639,11 +976,21 @@ export default function ControlPanel({
           .writeText(JSON.stringify({ ...areas[selectedElement.id] }))
           .catch(() => Toast.error(t("oops_smth_went_wrong")));
         break;
+      case ObjectType.VIEW:
+        navigator.clipboard
+          .writeText(
+            JSON.stringify(views.find((v) => v.id === selectedElement.id)),
+          )
+          .catch(() => Toast.error(t("oops_smth_went_wrong")));
+        break;
       default:
         break;
     }
   };
   const paste = () => {
+    if (layout.readOnly) {
+      return;
+    }
     navigator.clipboard.readText().then((text) => {
       let obj = null;
       try {
@@ -652,12 +999,30 @@ export default function ControlPanel({
         return;
       }
       const v = new Validator();
-      if (v.validate(obj, tableSchema).valid) {
+      if (v.validate(obj, viewSchema).valid) {
+        addView({
+          view: {
+            ...obj,
+            x: obj.x + 20,
+            y: obj.y + 20,
+            id: nanoid(),
+            columns: (obj.columns ?? []).map((c) => ({ ...c, id: nanoid() })),
+            joins: (obj.joins ?? []).map((j) => ({ ...j, id: nanoid() })),
+            conditions: (obj.conditions ?? []).map((c) => ({
+              ...c,
+              id: nanoid(),
+            })),
+          },
+          index: views.length,
+        });
+      } else if (v.validate(obj, tableSchema).valid) {
         addTable({
-          ...obj,
-          x: obj.x + 20,
-          y: obj.y + 20,
-          id: tables.length,
+          table: {
+            ...obj,
+            x: obj.x + 20,
+            y: obj.y + 20,
+            id: nanoid(),
+          },
         });
       } else if (v.validate(obj, areaSchema).valid) {
         addArea({
@@ -666,7 +1031,7 @@ export default function ControlPanel({
           y: obj.y + 20,
           id: areas.length,
         });
-      } else if (v.validate(obj, noteSchema)) {
+      } else if (v.validate(obj, noteSchema).valid) {
         addNote({
           ...obj,
           x: obj.x + 20,
@@ -677,13 +1042,149 @@ export default function ControlPanel({
     });
   };
   const cut = () => {
+    if (layout.readOnly) {
+      return;
+    }
     copy();
     del();
   };
-  const save = () => setSaveState(State.SAVING);
+  const toggleDBMLEditor = () => {
+    setLayout((prev) => ({ ...prev, dbmlEditor: !prev.dbmlEditor }));
+  };
+  const save = async () => {
+    if (typeof extensions.cloudSave === "function") {
+      // TODO: dont have blank here have null
+      const isNew = diagramId === "blank";
+      const newId = isNew ? uuidv4() : diagramId;
+      const diagramData = {
+        diagramId: newId,
+        database,
+        name: title,
+        gistId: gistId ?? "",
+        lastModified: new Date(),
+        tables,
+        references: relationships,
+        notes,
+        areas,
+        views,
+        pan: transform.pan,
+        zoom: transform.zoom,
+        ...(databases[database].hasEnums && { enums }),
+        ...(databases[database].hasTypes && { types }),
+      };
+      try {
+        await extensions.cloudSave(diagramData, { isNew });
+        if (isNew) {
+          navigate(`/editor/diagrams/${newId}`, { replace: true });
+        }
+        setSaveState(State.SAVED);
+        if (typeof setLastSaved === "function") {
+          setLastSaved(new Date().toLocaleString());
+        }
+      } catch (err) {
+        if (err?.response?.status === 402) {
+          setSaveState(State.NONE);
+          navigate("/checkout?tier=solo_pro");
+          return;
+        }
+        setSaveState(State.ERROR);
+      }
+      return;
+    }
+    setSaveState(State.SAVING);
+  };
+  const { cloud, local } = useDiagramList();
+  const recentlyOpenedDiagrams = useMemo(() => {
+    const sorted = sortDiagrams(mergeDiagrams(cloud, local), {
+      key: "lastModified",
+      dir: "desc",
+    });
+    const seen = new Set();
+    const recent = [];
+    for (const entry of sorted) {
+      if (entry.diagramId == null || seen.has(entry.diagramId)) continue;
+      seen.add(entry.diagramId);
+      recent.push(entry);
+      if (recent.length === 10) break;
+    }
+    return recent;
+  }, [cloud, local]);
+
   const open = () => setModal(MODAL.OPEN);
   const saveDiagramAs = () => setModal(MODAL.SAVEAS);
+
+  const saveAsCopy = async (newTitle) => {
+    const newId = uuidv4();
+    const diagramData = {
+      diagramId: newId,
+      database,
+      name: newTitle,
+      gistId: "",
+      loadedFromGistId: "",
+      lastModified: new Date(),
+      tables,
+      references: relationships,
+      notes,
+      areas,
+      views,
+      pan: transform.pan,
+      zoom: transform.zoom,
+      ...(databases[database].hasEnums && { enums }),
+      ...(databases[database].hasTypes && { types }),
+    };
+
+    if (typeof extensions.cloudSave === "function") {
+      try {
+        await extensions.cloudSave(diagramData, { isNew: true });
+      } catch (err) {
+        if (err?.response?.status === 402) {
+          setSaveState(State.NONE);
+          navigate("/checkout?tier=solo_pro");
+          return;
+        }
+        setSaveState(State.ERROR);
+        Toast.error(t("oops_smth_went_wrong"));
+        return;
+      }
+    } else {
+      try {
+        await db.diagrams.add(diagramData);
+      } catch (err) {
+        console.error(err);
+        setSaveState(State.ERROR);
+        Toast.error(t("oops_smth_went_wrong"));
+        return;
+      }
+    }
+
+    let toastId;
+    toastId = Toast.success({
+      duration: 8,
+      content: (
+        <span>
+          {t("saved_as_copy")}{" "}
+          <Typography.Text
+            link={{
+              href: `/editor/diagrams/${newId}${window.location.search}`,
+              target: "_blank",
+              rel: "noopener noreferrer",
+            }}
+            underline
+            onClick={() => Toast.close(toastId)}
+          >
+            {newTitle}
+          </Typography.Text>
+        </span>
+      ),
+    });
+  };
+
   const fullscreen = useFullscreen();
+
+  useEffect(() => {
+    if (!fullscreen)
+      setLayout((p) => ({ ...p, header: true, sidebar: true, toolbar: true }));
+  }, [fullscreen, setLayout]);
 
   const menu = {
     file: {
@@ -691,26 +1192,54 @@ export default function ControlPanel({
         function: () => setModal(MODAL.NEW),
       },
       new_window: {
-        function: () => {
-          const newWindow = window.open("/editor", "_blank");
-          newWindow.name = window.name;
-        },
+        function: () => window.open("/editor", "_blank"),
       },
       open: {
         function: open,
         shortcut: "Ctrl+O",
       },
+      open_recent: {
+        children: [
+          ...(recentlyOpenedDiagrams && recentlyOpenedDiagrams.length > 0
+            ? [
+                ...recentlyOpenedDiagrams.map((diagram) => ({
+                  name: diagram.name,
+                  label: DateTime.fromJSDate(new Date(diagram.lastModified))
+                    .setLocale(i18n.language)
+                    .toRelative(),
+                  function: () => {
+                    navigate(`/editor/diagrams/${diagram.diagramId}`);
+                  },
+                })),
+                { divider: true },
+                {
+                  name: t("see_all"),
+                  function: () => open(),
+                },
+              ]
+            : [
+                {
+                  name: t("no_saved_diagrams"),
+                  disabled: true,
+                },
+              ]),
+        ],
+
+        function: () => {},
+      },
       save: {
         function: save,
         shortcut: "Ctrl+S",
+        disabled: layout.readOnly,
       },
       save_as: {
         function: saveDiagramAs,
         shortcut: "Ctrl+Shift+S",
+        disabled: layout.readOnly,
       },
       save_as_template: {
-        function: () => {
-          db.templates
+        function: async () => {
+          await db.templates
             .add({
               title: title,
               tables: tables,
@@ -718,7 +1247,9 @@ export default function ControlPanel({
               relationships: relationships,
               notes: notes,
               subjectAreas: areas,
+              views: views,
               custom: 1,
+              templateId: uuidv4(),
               ...(databases[database].hasEnums && { enums: enums }),
               ...(databases[database].hasTypes && { types: types }),
             })
@@ -730,8 +1261,8 @@ export default function ControlPanel({
       rename: {
         function: () => {
           setModal(MODAL.RENAME);
-          setPrevTitle(title);
         },
+        disabled: layout.readOnly,
       },
       delete_diagram: {
         warning: {
@@ -739,59 +1270,100 @@ export default function ControlPanel({
           message: t("are_you_sure_delete_diagram"),
         },
         function: async () => {
-          await db.diagrams
-            .delete(diagramId)
-            .then(() => {
-              setDiagramId(0);
-              setTitle("Untitled diagram");
-              setTables([]);
-              setRelationships([]);
-              setAreas([]);
-              setNotes([]);
-              setTypes([]);
-              setEnums([]);
-              setUndoStack([]);
-              setRedoStack([]);
-            })
-            .catch(() => Toast.error(t("oops_smth_went_wrong")));
+          try {
+            if (typeof extensions.cloudDelete === "function") {
+              await extensions.cloudDelete(diagramId);
+            } else {
+              await db.diagrams.where("diagramId").equals(diagramId).delete();
+            }
+            setTitle("Untitled diagram");
+            setTables([]);
+            setRelationships([]);
+            setAreas([]);
+            setNotes([]);
+            setTypes([]);
+            setEnums([]);
+            setViews([]);
+            setUndoStack([]);
+            setRedoStack([]);
+            setGistId("");
+            navigate("/editor/templates/blank", { replace: true });
+          } catch {
+            Toast.error(t("oops_smth_went_wrong"));
+          }
         },
       },
-      import_diagram: {
-        function: fileImport,
-        shortcut: "Ctrl+I",
+      import_from: {
+        children: [
+          {
+            function: () => {
+              setModal(MODAL.IMPORT);
+              setImportFrom(IMPORT_FROM.JSON);
+            },
+            name: "JSON",
+            disabled: layout.readOnly,
+          },
+          {
+            function: () => {
+              setModal(MODAL.IMPORT);
+              setImportFrom(IMPORT_FROM.DBML);
+            },
+            name: "DBML",
+            disabled: layout.readOnly,
+          },
+        ],
       },
       import_from_source: {
         ...(database === DB.GENERIC && {
           children: [
             {
-              MySQL: () => {
+              function: () => {
                 setModal(MODAL.IMPORT_SRC);
                 setImportDb(DB.MYSQL);
               },
+              name: "MySQL",
+              disabled: layout.readOnly,
             },
             {
-              PostgreSQL: () => {
+              function: () => {
                 setModal(MODAL.IMPORT_SRC);
                 setImportDb(DB.POSTGRES);
               },
+              name: "PostgreSQL",
+              disabled: layout.readOnly,
             },
             {
-              SQLite: () => {
+              function: () => {
                 setModal(MODAL.IMPORT_SRC);
                 setImportDb(DB.SQLITE);
               },
+              name: "SQLite",
+              disabled: layout.readOnly,
             },
             {
-              MariaDB: () => {
+              function: () => {
                 setModal(MODAL.IMPORT_SRC);
                 setImportDb(DB.MARIADB);
               },
+              name: "MariaDB",
+              disabled: layout.readOnly,
             },
             {
-              MSSQL: () => {
+              function: () => {
                 setModal(MODAL.IMPORT_SRC);
                 setImportDb(DB.MSSQL);
               },
+              name: "MSSQL",
+              disabled: layout.readOnly,
+            },
+            {
+              function: () => {
+                setModal(MODAL.IMPORT_SRC);
+                setImportDb(DB.ORACLESQL);
+              },
+              name: "Oracle",
+              label: "Beta",
+              disabled: layout.readOnly,
             },
           ],
         }),
@@ -800,18 +1372,21 @@ export default function ControlPanel({
 
           setModal(MODAL.IMPORT_SRC);
         },
+        disabled: layout.readOnly,
       },
       export_source: {
         ...(database === DB.GENERIC && {
           children: [
             {
-              MySQL: () => {
-                setModal(MODAL.CODE);
+              name: "MySQL",
+              function: () => {
+                openExportModal(MODAL.CODE);
                 const src = jsonToMySQL({
                   tables: tables,
                   references: relationships,
                   types: types,
                   database: database,
+                  views: views,
                 });
                 setExportData((prev) => ({
                   ...prev,
@@ -821,13 +1396,15 @@ export default function ControlPanel({
               },
             },
             {
-              PostgreSQL: () => {
-                setModal(MODAL.CODE);
+              name: "PostgreSQL",
+              function: () => {
+                openExportModal(MODAL.CODE);
                 const src = jsonToPostgreSQL({
                   tables: tables,
                   references: relationships,
                   types: types,
                   database: database,
+                  views: views,
                 });
                 setExportData((prev) => ({
                   ...prev,
@@ -837,13 +1414,15 @@ export default function ControlPanel({
               },
             },
             {
-              SQLite: () => {
-                setModal(MODAL.CODE);
+              name: "SQLite",
+              function: () => {
+                openExportModal(MODAL.CODE);
                 const src = jsonToSQLite({
                   tables: tables,
                   references: relationships,
                   types: types,
                   database: database,
+                  views: views,
                 });
                 setExportData((prev) => ({
                   ...prev,
@@ -853,13 +1432,15 @@ export default function ControlPanel({
               },
             },
             {
-              MariaDB: () => {
-                setModal(MODAL.CODE);
+              name: "MariaDB",
+              function: () => {
+                openExportModal(MODAL.CODE);
                 const src = jsonToMariaDB({
                   tables: tables,
                   references: relationships,
                   types: types,
                   database: database,
+                  views: views,
                 });
                 setExportData((prev) => ({
                   ...prev,
@@ -869,13 +1450,34 @@ export default function ControlPanel({
               },
             },
             {
-              MSSQL: () => {
-                setModal(MODAL.CODE);
+              name: "MSSQL",
+              function: () => {
+                openExportModal(MODAL.CODE);
                 const src = jsonToSQLServer({
                   tables: tables,
                   references: relationships,
                   types: types,
                   database: database,
+                  views: views,
+                });
+                setExportData((prev) => ({
+                  ...prev,
+                  data: src,
+                  extension: "sql",
+                }));
+              },
+            },
+            {
+              label: "Beta",
+              name: "Oracle",
+              function: () => {
+                openExportModal(MODAL.CODE);
+                const src = jsonToOracleSQL({
+                  tables: tables,
+                  references: relationships,
+                  types: types,
+                  database: database,
+                  views: views,
                 });
                 setExportData((prev) => ({
                   ...prev,
@@ -888,13 +1490,14 @@ export default function ControlPanel({
         }),
         function: () => {
           if (database === DB.GENERIC) return;
-          setModal(MODAL.CODE);
+          openExportModal(MODAL.CODE);
           const src = exportSQL({
             tables: tables,
             references: relationships,
             types: types,
             database: database,
             enums: enums,
+            views: views,
           });
           setExportData((prev) => ({
             ...prev,
@@ -906,19 +1509,23 @@ export default function ControlPanel({
       export_as: {
         children: [
           {
-            PNG: () => {
-              toPng(document.getElementById("canvas")).then(function (dataUrl) {
+            name: "PNG",
+            function: () => {
+              toPng(document.getElementById("canvas"), {
+                pixelRatio: pngExportPixelRatio,
+              }).then(function (dataUrl) {
                 setExportData((prev) => ({
                   ...prev,
                   data: dataUrl,
                   extension: "png",
                 }));
               });
-              setModal(MODAL.IMG);
+              openExportModal(MODAL.IMG);
             },
           },
           {
-            JPEG: () => {
+            name: "JPEG",
+            function: () => {
               toJpeg(document.getElementById("canvas"), { quality: 0.95 }).then(
                 function (dataUrl) {
                   setExportData((prev) => ({
@@ -928,18 +1535,36 @@ export default function ControlPanel({
                   }));
                 },
               );
-              setModal(MODAL.IMG);
+              openExportModal(MODAL.IMG);
             },
           },
           {
-            JSON: () => {
-              setModal(MODAL.CODE);
+            name: "SVG",
+            function: () => {
+              const filter = (node) => node.tagName !== "i";
+              toSvg(document.getElementById("canvas"), { filter: filter }).then(
+                function (dataUrl) {
+                  setExportData((prev) => ({
+                    ...prev,
+                    data: dataUrl,
+                    extension: "svg",
+                  }));
+                },
+              );
+              openExportModal(MODAL.IMG);
+            },
+          },
+          {
+            name: "JSON",
+            function: () => {
+              openExportModal(MODAL.CODE);
               const result = JSON.stringify(
                 {
                   tables: tables,
                   relationships: relationships,
                   notes: notes,
                   subjectAreas: areas,
+                  views: views,
                   database: database,
                   ...(databases[database].hasTypes && { types: types }),
                   ...(databases[database].hasEnums && { enums: enums }),
@@ -956,23 +1581,27 @@ export default function ControlPanel({
             },
           },
           {
-            SVG: () => {
-              const filter = (node) => node.tagName !== "i";
-              toSvg(document.getElementById("canvas"), { filter: filter }).then(
-                function (dataUrl) {
-                  setExportData((prev) => ({
-                    ...prev,
-                    data: dataUrl,
-                    extension: "svg",
-                  }));
-                },
-              );
-              setModal(MODAL.IMG);
+            name: "DBML",
+            function: () => {
+              openExportModal(MODAL.CODE);
+              const result = toDBML({
+                tables,
+                relationships,
+                enums,
+                database,
+              });
+              setExportData((prev) => ({
+                ...prev,
+                data: result,
+                extension: "dbml",
+              }));
             },
           },
           {
-            PDF: () => {
+            name: "PDF",
+            function: () => {
               const canvas = document.getElementById("canvas");
+              const filename = `${title}_${new Date().toISOString()}`;
               toJpeg(canvas).then(function (dataUrl) {
                 const doc = new jsPDF("l", "px", [
                   canvas.offsetWidth,
@@ -986,32 +1615,49 @@ export default function ControlPanel({
                   canvas.offsetWidth,
                   canvas.offsetHeight,
                 );
-                doc.save(`${exportData.filename}.pdf`);
+                doc.save(`${filename}.pdf`);
               });
             },
           },
           {
-            DRAWDB: () => {
-              const result = JSON.stringify(
-                {
-                  author: "Unnamed",
-                  title: title,
-                  date: new Date().toISOString(),
-                  tables: tables,
-                  relationships: relationships,
-                  notes: notes,
-                  subjectAreas: areas,
-                  database: database,
-                  ...(databases[database].hasTypes && { types: types }),
-                  ...(databases[database].hasEnums && { enums: enums }),
-                },
-                null,
-                2,
-              );
-              const blob = new Blob([result], {
-                type: "text/plain;charset=utf-8",
+            name: "Mermaid",
+            function: () => {
+              openExportModal(MODAL.CODE);
+              const result = jsonToMermaid({
+                tables: tables,
+                relationships: relationships,
+                notes: notes,
+                subjectAreas: areas,
+                database: database,
+                title: title,
               });
-              saveAs(blob, `${exportData.filename}.ddb`);
+              setExportData((prev) => ({
+                ...prev,
+                data: result,
+                extension: "md",
+              }));
+            },
+          },
+          {
+            name: "Markdown",
+            function: () => {
+              openExportModal(MODAL.CODE);
+              const result = jsonToDocumentation({
+                tables: tables,
+                relationships: relationships,
+                notes: notes,
+                subjectAreas: areas,
+                views: views,
+                database: database,
+                title: title,
+                ...(databases[database].hasTypes && { types: types }),
+                ...(databases[database].hasEnums && { enums: enums }),
+              });
+              setExportData((prev) => ({
+                ...prev,
+                data: result,
+                extension: "md",
+              }));
             },
           },
         ],
@@ -1028,34 +1674,40 @@ export default function ControlPanel({
       undo: {
         function: undo,
         shortcut: "Ctrl+Z",
+        disabled: layout.readOnly || undoStack.length === 0,
       },
       redo: {
         function: redo,
         shortcut: "Ctrl+Y",
+        disabled: layout.readOnly || redoStack.length === 0,
       },
       clear: {
         warning: {
           title: t("clear"),
           message: t("are_you_sure_clear"),
         },
-        function: () => {
+        function: async () => {
           setTables([]);
           setRelationships([]);
           setAreas([]);
           setNotes([]);
           setEnums([]);
           setTypes([]);
+          setViews([]);
           setUndoStack([]);
           setRedoStack([]);
         },
+        disabled: layout.readOnly,
       },
       edit: {
         function: edit,
         shortcut: "Ctrl+E",
+        disabled: layout.readOnly,
       },
       cut: {
         function: cut,
         shortcut: "Ctrl+X",
+        disabled: layout.readOnly,
       },
       copy: {
         function: copy,
@@ -1064,14 +1716,25 @@ export default function ControlPanel({
       paste: {
         function: paste,
         shortcut: "Ctrl+V",
+        disabled: layout.readOnly,
       },
       duplicate: {
         function: duplicate,
         shortcut: "Ctrl+D",
+        disabled: layout.readOnly,
       },
       delete: {
         function: del,
         shortcut: "Del",
+        disabled: layout.readOnly,
+      },
+      auto_arrange: {
+        function: autoArrangeTables,
+        disabled: layout.readOnly,
+      },
+      auto_connect_fk: {
+        function: autoConnectFKs,
+        disabled: layout.readOnly,
       },
       copy_as_image: {
         function: copyAsImage,
@@ -1106,6 +1769,15 @@ export default function ControlPanel({
         function: () =>
           setLayout((prev) => ({ ...prev, issues: !prev.issues })),
       },
+      dbml_view: {
+        state: layout.dbmlEditor ? (
+          <i className="bi bi-toggle-on" />
+        ) : (
+          <i className="bi bi-toggle-off" />
+        ),
+        function: toggleDBMLEditor,
+        shortcut: "Alt+E",
+      },
       strict_mode: {
         state: settings.strictMode ? (
           <i className="bi bi-toggle-off" />
@@ -1137,7 +1809,31 @@ export default function ControlPanel({
       },
       reset_view: {
         function: resetView,
-        shortcut: "Ctrl+R",
+        shortcut: "Enter/Return",
+      },
+      show_comments: {
+        state: settings.showComments ? (
+          <i className="bi bi-toggle-on" />
+        ) : (
+          <i className="bi bi-toggle-off" />
+        ),
+        function: () =>
+          setSettings((prev) => ({
+            ...prev,
+            showComments: !prev.showComments,
+          })),
+      },
+      show_datatype: {
+        state: settings.showDataTypes ? (
+          <i className="bi bi-toggle-on" />
+        ) : (
+          <i className="bi bi-toggle-off" />
+        ),
+        function: () =>
+          setSettings((prev) => ({
+            ...prev,
+            showDataTypes: !prev.showDataTypes,
+          })),
       },
       show_grid: {
         state: settings.showGrid ? (
@@ -1147,6 +1843,14 @@ export default function ControlPanel({
         ),
         function: viewGrid,
         shortcut: "Ctrl+Shift+G",
+      },
+      snap_to_grid: {
+        state: settings.snapToGrid ? (
+          <i className="bi bi-toggle-on" />
+        ) : (
+          <i className="bi bi-toggle-off" />
+        ),
+        function: snapToGrid,
       },
       show_cardinality: {
         state: settings.showCardinality ? (
@@ -1158,6 +1862,18 @@ export default function ControlPanel({
           setSettings((prev) => ({
             ...prev,
             showCardinality: !prev.showCardinality,
+          })),
+      },
+      show_relationship_labels: {
+        state: settings.showRelationshipLabels ? (
+          <i className="bi bi-toggle-on" />
+        ) : (
+          <i className="bi bi-toggle-off" />
+        ),
+        function: () =>
+          setSettings((prev) => ({
+            ...prev,
+            showRelationshipLabels: !prev.showRelationshipLabels,
           })),
       },
       show_debug_coordinates: {
@@ -1175,35 +1891,23 @@ export default function ControlPanel({
       theme: {
         children: [
           {
-            light: () => {
-              const body = document.body;
-              if (body.hasAttribute("theme-mode")) {
-                body.setAttribute("theme-mode", "light");
-              }
-              localStorage.setItem("theme", "light");
-              setSettings((prev) => ({ ...prev, mode: "light" }));
-            },
+            name: t("light"),
+            function: () => setSettings((prev) => ({ ...prev, mode: "light" })),
           },
           {
-            dark: () => {
-              const body = document.body;
-              if (body.hasAttribute("theme-mode")) {
-                body.setAttribute("theme-mode", "dark");
-              }
-              localStorage.setItem("theme", "dark");
-              setSettings((prev) => ({ ...prev, mode: "dark" }));
-            },
+            name: t("dark"),
+            function: () => setSettings((prev) => ({ ...prev, mode: "dark" })),
           },
         ],
         function: () => {},
       },
       zoom_in: {
         function: zoomIn,
-        shortcut: "Ctrl+Up/Wheel",
+        shortcut: "Ctrl+(Up/Wheel)",
       },
       zoom_out: {
         function: zoomOut,
-        shortcut: "Ctrl+Down/Wheel",
+        shortcut: "Ctrl+(Down/Wheel)",
       },
       fullscreen: {
         state: fullscreen ? (
@@ -1227,20 +1931,25 @@ export default function ControlPanel({
         function: () =>
           setSettings((prev) => ({ ...prev, autosave: !prev.autosave })),
       },
-      panning: {
-        state: settings.panning ? (
-          <i className="bi bi-toggle-on" />
-        ) : (
-          <i className="bi bi-toggle-off" />
-        ),
-        function: () =>
-          setSettings((prev) => ({ ...prev, panning: !prev.panning })),
-      },
       table_width: {
         function: () => setModal(MODAL.TABLE_WIDTH),
+        disabled: layout.readOnly,
+      },
+      configure_custom_types: {
+        function: () => setModal(MODAL.CONFIG_CUSTOM_TYPES),
+        disabled: layout.readOnly,
       },
       language: {
         function: () => setModal(MODAL.LANGUAGE),
+      },
+      export_saved_data: {
+        function: exportSavedData,
+      },
+      clear_cache: {
+        function: () => {
+          deleteFromCache(gistId);
+          Toast.success(t("cache_cleared"));
+        },
       },
       flush_storage: {
         warning: {
@@ -1248,10 +1957,12 @@ export default function ControlPanel({
           message: t("are_you_sure_flush_storage"),
         },
         function: async () => {
+          localStorage.removeItem(STORAGE_KEY);
           db.delete()
             .then(() => {
               Toast.success(t("storage_flushed"));
-              window.location.reload(false);
+              navigate("/editor", { replace: true });
+              window.location.reload();
             })
             .catch(() => {
               Toast.error(t("oops_smth_went_wrong"));
@@ -1260,86 +1971,151 @@ export default function ControlPanel({
       },
     },
     help: {
-      shortcuts: {
-        function: () => window.open("/shortcuts", "_blank"),
+      docs: {
+        function: () => window.open(`${socials.docs}`, "_blank"),
         shortcut: "Ctrl+H",
       },
+      shortcuts: {
+        function: () => window.open(`${socials.docs}/shortcuts`, "_blank"),
+      },
       ask_on_discord: {
-        function: () => window.open("https://discord.gg/BrjZgNrmR6", "_blank"),
+        function: () => window.open(socials.discord, "_blank"),
       },
       report_bug: {
         function: () => window.open("/bug-report", "_blank"),
       },
-      feedback: {
-        function: () => window.open("/survey", "_blank"),
-      },
     },
   };
 
-  useHotkeys("ctrl+i, meta+i", fileImport, { preventDefault: true });
-  useHotkeys("ctrl+z, meta+z", undo, { preventDefault: true });
-  useHotkeys("ctrl+y, meta+y", redo, { preventDefault: true });
-  useHotkeys("ctrl+s, meta+s", save, { preventDefault: true });
-  useHotkeys("ctrl+o, meta+o", open, { preventDefault: true });
-  useHotkeys("ctrl+e, meta+e", edit, { preventDefault: true });
-  useHotkeys("ctrl+d, meta+d", duplicate, { preventDefault: true });
-  useHotkeys("ctrl+c, meta+c", copy, { preventDefault: true });
-  useHotkeys("ctrl+v, meta+v", paste, { preventDefault: true });
-  useHotkeys("ctrl+x, meta+x", cut, { preventDefault: true });
-  useHotkeys("delete", del, { preventDefault: true });
-  useHotkeys("ctrl+shift+g, meta+shift+g", viewGrid, { preventDefault: true });
-  useHotkeys("ctrl+up, meta+up", zoomIn, { preventDefault: true });
-  useHotkeys("ctrl+down, meta+down", zoomOut, { preventDefault: true });
-  useHotkeys("ctrl+shift+m, meta+shift+m", viewStrictMode, {
-    preventDefault: true,
-  });
-  useHotkeys("ctrl+shift+f, meta+shift+f", viewFieldSummary, {
-    preventDefault: true,
-  });
-  useHotkeys("ctrl+shift+s, meta+shift+s", saveDiagramAs, {
-    preventDefault: true,
-  });
-  useHotkeys("ctrl+alt+c, meta+alt+c", copyAsImage, { preventDefault: true });
-  useHotkeys("ctrl+r, meta+r", resetView, { preventDefault: true });
-  useHotkeys("ctrl+h, meta+h", () => window.open("/shortcuts", "_blank"), {
-    preventDefault: true,
-  });
-  useHotkeys("ctrl+alt+w, meta+alt+w", fitWindow, { preventDefault: true });
+  useHotkeys("mod+i", fileImport, EDITOR_HOTKEY);
+  useHotkeys("mod+z", undo, EDITOR_HOTKEY);
+  useHotkeys("mod+y", redo, EDITOR_HOTKEY);
+  useHotkeys("mod+s", save, EDITOR_HOTKEY);
+  useHotkeys("mod+o", open, EDITOR_HOTKEY);
+  useHotkeys("mod+e", edit, EDITOR_HOTKEY);
+  useHotkeys("mod+d", duplicate, EDITOR_HOTKEY);
+  useHotkeys("mod+c", copy, EDITOR_HOTKEY);
+  useHotkeys("mod+v", paste, EDITOR_HOTKEY);
+  useHotkeys("mod+x", cut, EDITOR_HOTKEY);
+  useHotkeys("delete", del, EDITOR_HOTKEY);
+  useHotkeys("mod+shift+g", viewGrid, EDITOR_HOTKEY);
+  useHotkeys("mod+up", zoomIn, EDITOR_HOTKEY);
+  useHotkeys("mod+down", zoomOut, EDITOR_HOTKEY);
+  useHotkeys("mod+shift+m", viewStrictMode, EDITOR_HOTKEY);
+  useHotkeys("mod+shift+f", viewFieldSummary, EDITOR_HOTKEY);
+  useHotkeys("mod+shift+s", saveDiagramAs, EDITOR_HOTKEY);
+  useHotkeys("mod+alt+c", copyAsImage, EDITOR_HOTKEY);
+  useHotkeys("enter", resetView, EDITOR_HOTKEY);
+  useHotkeys("mod+h", () => window.open(socials.docs, "_blank"), EDITOR_HOTKEY);
+  useHotkeys("mod+alt+w", fitWindow, EDITOR_HOTKEY);
+  useHotkeys("alt+e", toggleDBMLEditor, EDITOR_HOTKEY);
+  useHotkeys("left", panLeft, EDITOR_HOTKEY);
+  useHotkeys("right", panRight, EDITOR_HOTKEY);
+  useHotkeys("up", panUp, EDITOR_HOTKEY);
+  useHotkeys("down", panDown, EDITOR_HOTKEY);
 
   return (
     <>
-      {layout.header && header()}
-      {layout.toolbar && toolbar()}
+      <div>
+        {layout.header && (
+          <div
+            className="flex justify-between items-center border-b border-color pb-2"
+            style={isRtl(i18n.language) ? { direction: "rtl" } : {}}
+          >
+            {header()}
+            <div className="flex items-center gap-2 me-7">
+              <Slot name="header-actions-start" />
+              {!isTemplate && (
+                <Button
+                  type="primary"
+                  className="!text-base !pe-6 !ps-5 !py-[18px] !rounded-md"
+                  size="default"
+                  icon={<IconShareStroked />}
+                  onClick={() => setModal(MODAL.SHARE)}
+                >
+                  {t("share")}
+                </Button>
+              )}
+              <Slot name="header-actions-end" />
+            </div>
+          </div>
+        )}
+        {layout.toolbar &&
+          toolbarContainer &&
+          createPortal(toolbar(), toolbarContainer)}
+      </div>
       <Modal
         modal={modal}
         exportData={exportData}
         setExportData={setExportData}
         title={title}
         setTitle={setTitle}
-        setPrevTitle={setPrevTitle}
-        setDiagramId={setDiagramId}
         setModal={setModal}
-        prevTitle={prevTitle}
+        importFrom={importFrom}
         importDb={importDb}
+        saveAsCopy={saveAsCopy}
       />
       <Sidesheet
         type={sidesheet}
+        title={title}
+        setTitle={setTitle}
         onClose={() => setSidesheet(SIDESHEET.NONE)}
       />
+      <ConfigureCustomTypes
+        open={modal === MODAL.CONFIG_CUSTOM_TYPES}
+        onClose={() => setModal(MODAL.NONE)}
+      />
+      <SemiModal
+        title={t("auto_connect_fk_modal_title")}
+        centered
+        visible={showAutoConnectModal}
+        onOk={confirmAutoConnectFKs}
+        onCancel={() => setShowAutoConnectModal(false)}
+        okText={t("auto_connect_fk")}
+        cancelText={t("cancel")}
+      >
+        <div className="space-y-3">
+          <p className="text-sm">
+            {t("auto_connect_fk_modal_description")}
+          </p>
+          <ol className="list-decimal ps-5 space-y-1 text-sm">
+            <li>{t("auto_connect_fk_rule_1")}</li>
+            <li>{t("auto_connect_fk_rule_2")}</li>
+          </ol>
+          <p className="text-sm font-medium mt-2">
+            {t("auto_connect_fk_modal_question")}
+          </p>
+        </div>
+      </SemiModal>
     </>
   );
 
   function toolbar() {
     return (
-      <div className="py-1.5 px-5 flex justify-between items-center rounded-xl my-1 sm:mx-1 xl:mx-6 select-none overflow-hidden toolbar-theme">
+      <div
+        className="py-1.5 px-3 flex items-center gap-1 rounded-xl select-none overflow-hidden toolbar-theme shadow-lg"
+        style={isRtl(i18n.language) ? { direction: "rtl" } : {}}
+      >
         <div className="flex justify-start items-center">
           <LayoutDropdown />
           <Divider layout="vertical" margin="8px" />
+          <Tooltip content={t("zoom_out")} position="bottom">
+            <button
+              className="py-1 px-2 hover-2 rounded-sm text-lg"
+              onClick={() =>
+                setTransform((prev) => ({ ...prev, zoom: prev.zoom / 1.2 }))
+              }
+            >
+              <i className="fa-solid fa-magnifying-glass-minus" />
+            </button>
+          </Tooltip>
           <Dropdown
             style={{ width: "240px" }}
-            position="bottomLeft"
+            position={isRtl(i18n.language) ? "bottomRight" : "bottomLeft"}
             render={
-              <Dropdown.Menu>
+              <Dropdown.Menu
+                style={isRtl(i18n.language) ? { direction: "rtl" } : {}}
+              >
                 <Dropdown.Item
                   onClick={fitWindow}
                   style={{ display: "flex", justifyContent: "space-between" }}
@@ -1377,7 +2153,7 @@ export default function ControlPanel({
             }
             trigger="click"
           >
-            <div className="py-1 px-2 hover-2 rounded flex items-center justify-center">
+            <div className="py-1 px-2 hover-2 rounded-sm flex items-center justify-center">
               <div className="w-[40px]">
                 {Math.floor(transform.zoom * 100)}%
               </div>
@@ -1388,7 +2164,7 @@ export default function ControlPanel({
           </Dropdown>
           <Tooltip content={t("zoom_in")} position="bottom">
             <button
-              className="py-1 px-2 hover-2 rounded text-lg"
+              className="py-1 px-2 hover-2 rounded-sm text-lg"
               onClick={() =>
                 setTransform((prev) => ({ ...prev, zoom: prev.zoom * 1.2 }))
               }
@@ -1396,92 +2172,102 @@ export default function ControlPanel({
               <i className="fa-solid fa-magnifying-glass-plus" />
             </button>
           </Tooltip>
-          <Tooltip content={t("zoom_out")} position="bottom">
-            <button
-              className="py-1 px-2 hover-2 rounded text-lg"
-              onClick={() =>
-                setTransform((prev) => ({ ...prev, zoom: prev.zoom / 1.2 }))
-              }
-            >
-              <i className="fa-solid fa-magnifying-glass-minus" />
-            </button>
-          </Tooltip>
           <Divider layout="vertical" margin="8px" />
           <Tooltip content={t("undo")} position="bottom">
             <button
-              className="py-1 px-2 hover-2 rounded flex items-center"
+              className="py-1 px-2 hover-2 rounded-sm flex items-center disabled:opacity-50"
+              disabled={undoStack.length === 0 || layout.readOnly}
               onClick={undo}
             >
-              <IconUndo
-                size="large"
-                style={{ color: undoStack.length === 0 ? "#9598a6" : "" }}
-              />
+              <IconUndo size="large" />
             </button>
           </Tooltip>
           <Tooltip content={t("redo")} position="bottom">
             <button
-              className="py-1 px-2 hover-2 rounded flex items-center"
+              className="py-1 px-2 hover-2 rounded-sm flex items-center disabled:opacity-50"
+              disabled={redoStack.length === 0 || layout.readOnly}
               onClick={redo}
             >
-              <IconRedo
-                size="large"
-                style={{ color: redoStack.length === 0 ? "#9598a6" : "" }}
-              />
+              <IconRedo size="large" />
             </button>
           </Tooltip>
           <Divider layout="vertical" margin="8px" />
           <Tooltip content={t("add_table")} position="bottom">
             <button
-              className="flex items-center py-1 px-2 hover-2 rounded"
+              className="flex items-center py-1 px-2 hover-2 rounded-sm disabled:opacity-50"
               onClick={() => addTable()}
+              disabled={layout.readOnly}
             >
               <IconAddTable />
             </button>
           </Tooltip>
+          <Tooltip content={t("add_view")} position="bottom">
+            <button
+              className="flex items-center py-1 px-2 hover-2 rounded-sm disabled:opacity-50"
+              onClick={() => addView()}
+              disabled={layout.readOnly}
+            >
+              <IconAddView />
+            </button>
+          </Tooltip>
           <Tooltip content={t("add_area")} position="bottom">
             <button
-              className="py-1 px-2 hover-2 rounded flex items-center"
+              className="py-1 px-2 hover-2 rounded-sm flex items-center disabled:opacity-50"
               onClick={() => addArea()}
+              disabled={layout.readOnly}
             >
               <IconAddArea />
             </button>
           </Tooltip>
           <Tooltip content={t("add_note")} position="bottom">
             <button
-              className="py-1 px-2 hover-2 rounded flex items-center"
+              className="py-1 px-2 hover-2 rounded-sm flex items-center disabled:opacity-50"
               onClick={() => addNote()}
+              disabled={layout.readOnly}
             >
               <IconAddNote />
             </button>
           </Tooltip>
           <Divider layout="vertical" margin="8px" />
+          <Tooltip content={t("auto_arrange")} position="bottom">
+            <button
+              className="py-1 px-2 hover-2 rounded-sm text-xl -mt-0.5 disabled:opacity-50"
+              onClick={autoArrangeTables}
+              disabled={layout.readOnly}
+            >
+              <i className="fa-solid fa-wand-magic-sparkles" />
+            </button>
+          </Tooltip>
+          <Divider layout="vertical" margin="8px" />
           <Tooltip content={t("save")} position="bottom">
             <button
-              className="py-1 px-2 hover-2 rounded flex items-center"
+              className="py-1 px-2 hover-2 rounded-sm flex items-center disabled:opacity-50"
               onClick={save}
+              disabled={layout.readOnly}
             >
               <IconSaveStroked size="extra-large" />
             </button>
           </Tooltip>
-          <Tooltip content={t("to_do")} position="bottom">
+          <Divider layout="vertical" margin="8px" />
+          <Tooltip content={t("versions")} position="bottom">
             <button
-              className="py-1 px-2 hover-2 rounded text-xl -mt-0.5"
-              onClick={() => setSidesheet(SIDESHEET.TODO)}
+              className="py-1 px-2 hover-2 rounded-sm text-xl -mt-0.5"
+              onClick={() => setSidesheet(SIDESHEET.VERSIONS)}
             >
-              <i className="fa-regular fa-calendar-check" />
+              <i className="fa-solid fa-code-branch" />
             </button>
           </Tooltip>
           <Divider layout="vertical" margin="8px" />
           <Tooltip content={t("theme")} position="bottom">
             <button
-              className="py-1 px-2 hover-2 rounded text-xl -mt-0.5"
+              className="py-1 px-2 hover-2 rounded-sm text-xl -mt-0.5"
               onClick={() => {
                 const body = document.body;
                 if (body.hasAttribute("theme-mode")) {
                   if (body.getAttribute("theme-mode") === "light") {
-                    menu["view"]["theme"].children[1]["dark"]();
+                    menu["view"]["theme"].children[1].function();
                   } else {
-                    menu["view"]["theme"].children[0]["light"]();
+                    menu["view"]["theme"].children[0].function();
                   }
                 }
               }}
@@ -1490,12 +2276,6 @@ export default function ControlPanel({
             </button>
           </Tooltip>
         </div>
-        <button
-          onClick={() => invertLayout("header")}
-          className="flex items-center"
-        >
-          {layout.header ? <IconChevronUp /> : <IconChevronDown />}
-        </button>
       </div>
     );
   }
@@ -1512,6 +2292,8 @@ export default function ControlPanel({
         return t("saving");
       case State.ERROR:
         return t("failed_to_save");
+      case State.FAILED_TO_LOAD:
+        return t("failed_to_load");
       default:
         return "";
     }
@@ -1519,14 +2301,17 @@ export default function ControlPanel({
 
   function header() {
     return (
-      <nav className="flex justify-between pt-1 items-center whitespace-nowrap">
+      <nav
+        className="flex justify-between pt-1 items-center whitespace-nowrap"
+        style={isRtl(i18n.language) ? { direction: "rtl" } : {}}
+      >
         <div className="flex justify-start items-center">
           <Link to="/">
             <img
               width={54}
               src={icon}
               alt="logo"
-              className="ms-8 min-w-[54px]"
+              className="ms-7 min-w-[54px]"
             />
           </Link>
           <div className="ms-1 mt-1">
@@ -1543,8 +2328,9 @@ export default function ControlPanel({
                   title={databases[database].name + " diagram"}
                 />
               )}
+              <Slot name="diagram-title-prefix" />
               <div
-                className="text-xl  me-1"
+                className="text-xl flex items-center gap-1 me-1"
                 onPointerEnter={(e) => e.isPrimary && setShowEditName(true)}
                 onPointerLeave={(e) => e.isPrimary && setShowEditName(false)}
                 onPointerDown={(e) => {
@@ -1552,40 +2338,74 @@ export default function ControlPanel({
                   // https://stackoverflow.com/a/70976017/1137077
                   e.target.releasePointerCapture(e.pointerId);
                 }}
-                onClick={() => setModal(MODAL.RENAME)}
+                onClick={!layout.readOnly && (() => setModal(MODAL.RENAME))}
               >
-                {window.name.split(" ")[0] === "t" ? "Templates/" : "Diagrams/"}
-                {title}
+                <span>{isTemplate ? "Templates" : "Diagrams"}</span>
+                <span className="select-none text-zinc-400 dark:text-zinc-500 mx-1">
+                  /
+                </span>
+                <span>{title}</span>
+                {version && (
+                  <Tag className="mt-1" color="blue" size="small">
+                    {version.substring(0, 7)}
+                  </Tag>
+                )}
               </div>
-              {(showEditName || modal === MODAL.RENAME) && <IconEdit />}
+              {(showEditName || modal === MODAL.RENAME) && !layout.readOnly && (
+                <IconEdit />
+              )}
             </div>
-            <div className="flex justify-between items-center">
+            <div className="flex items-center">
               <div className="flex justify-start text-md select-none me-2">
                 {Object.keys(menu).map((category) => (
                   <Dropdown
                     key={category}
                     position="bottomLeft"
-                    style={{ width: "240px" }}
+                    style={{
+                      width: "240px",
+                      direction: isRtl(i18n.language) ? "rtl" : "ltr",
+                    }}
                     render={
-                      <Dropdown.Menu>
+                      <Dropdown.Menu className="menu max-h-[calc(100vh-80px)] overflow-auto">
                         {Object.keys(menu[category]).map((item, index) => {
                           if (menu[category][item].children) {
                             return (
                               <Dropdown
-                                style={{ width: "120px" }}
+                                className="min-w-36 max-w-72"
                                 key={item}
                                 position="rightTop"
                                 render={
                                   <Dropdown.Menu>
                                     {menu[category][item].children.map(
-                                      (e, i) => (
-                                        <Dropdown.Item
-                                          key={i}
-                                          onClick={Object.values(e)[0]}
-                                        >
-                                          {t(Object.keys(e)[0])}
-                                        </Dropdown.Item>
-                                      ),
+                                      (e, i) => {
+                                        if (e.divider) {
+                                          return (
+                                            <Dropdown.Divider
+                                              key={`divider-${i}`}
+                                            />
+                                          );
+                                        }
+                                        return (
+                                          <Dropdown.Item
+                                            key={i}
+                                            onClick={e.function}
+                                            className="flex w-full items-center justify-between gap-1"
+                                            disabled={e.disabled}
+                                          >
+                                            <span className="truncate flex-1 min-w-0">
+                                              {e.name}
+                                            </span>
+                                            {e.label && (
+                                              <Tag
+                                                size="small"
+                                                className="flex-shrink-0"
+                                              >
+                                                {e.label}
+                                              </Tag>
+                                            )}
+                                          </Dropdown.Item>
+                                        );
+                                      },
                                     )}
                                   </Dropdown.Menu>
                                 }
@@ -1599,12 +2419,20 @@ export default function ControlPanel({
                                   onClick={menu[category][item].function}
                                 >
                                   {t(item)}
-                                  <IconChevronRight />
+
+                                  {isRtl(i18n.language) ? (
+                                    <IconChevronLeft />
+                                  ) : (
+                                    <IconChevronRight />
+                                  )}
                                 </Dropdown.Item>
                               </Dropdown>
                             );
                           }
-                          if (menu[category][item].warning) {
+                          if (
+                            menu[category][item].warning &&
+                            !menu[category][item].disabled
+                          ) {
                             return (
                               <Popconfirm
                                 key={index}
@@ -1622,6 +2450,7 @@ export default function ControlPanel({
                           return (
                             <Dropdown.Item
                               key={index}
+                              disabled={menu[category][item].disabled}
                               onClick={menu[category][item].function}
                               style={
                                 menu[category][item].shortcut && {
@@ -1649,23 +2478,27 @@ export default function ControlPanel({
                       </Dropdown.Menu>
                     }
                   >
-                    <div className="px-3 py-1 hover-2 rounded">
+                    <div className="px-3 py-1 hover-2 rounded-sm">
                       {t(category)}
                     </div>
                   </Dropdown>
                 ))}
               </div>
-              <Button
-                size="small"
-                type="tertiary"
-                icon={
-                  saveState === State.LOADING || saveState === State.SAVING ? (
-                    <Spin size="small" />
-                  ) : null
-                }
-              >
-                {getState()}
-              </Button>
+              {layout.readOnly && <Tag size="small">{t("read_only")}</Tag>}
+              {!layout.readOnly && (
+                <Tag
+                  size="small"
+                  type="light"
+                  prefixIcon={
+                    saveState === State.LOADING ||
+                    saveState === State.SAVING ? (
+                      <Spin size="small" />
+                    ) : null
+                  }
+                >
+                  {getState()}
+                </Tag>
+              )}
             </div>
           </div>
         </div>

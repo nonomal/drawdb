@@ -1,60 +1,83 @@
-import { createContext, useState } from "react";
+import { createContext, useCallback, useState } from "react";
 import { Action, DB, ObjectType, defaultBlue } from "../data/constants";
-import { useTransform, useUndoRedo, useSelect } from "../hooks";
+import { useTransform, useUndoRedo, useSelect, useCollab } from "../hooks";
 import { Toast } from "@douyinfe/semi-ui";
 import { useTranslation } from "react-i18next";
+import { nanoid } from "nanoid";
+import { getRelationshipFields } from "../utils/utils";
 
 export const DiagramContext = createContext(null);
 
 export default function DiagramContextProvider({ children }) {
   const { t } = useTranslation();
-  const [database, setDatabase] = useState(DB.GENERIC);
+  const [database, setDatabaseRaw] = useState(DB.GENERIC);
   const [tables, setTables] = useState([]);
   const [relationships, setRelationships] = useState([]);
   const { transform } = useTransform();
   const { setUndoStack, setRedoStack } = useUndoRedo();
   const { selectedElement, setSelectedElement } = useSelect();
+  const { emitDelta, isApplyingRemoteRef } = useCollab();
+
+  const shouldEmit = () => !isApplyingRemoteRef?.current;
+
+  const setDatabase = useCallback(
+    (next) => {
+      setDatabaseRaw(next);
+      if (!isApplyingRemoteRef?.current) {
+        emitDelta({
+          target: "database",
+          action: "update",
+          entityId: "database",
+          data: [next],
+        });
+      }
+    },
+    [emitDelta, isApplyingRemoteRef],
+  );
 
   const addTable = (data, addToHistory = true) => {
+    const id = nanoid();
+    const newTable = {
+      id,
+      name: `table_${id}`,
+      x: transform.pan.x,
+      y: transform.pan.y,
+      locked: false,
+      fields: [
+        {
+          name: "id",
+          type: database === DB.GENERIC ? "INT" : "INTEGER",
+          default: "",
+          check: "",
+          primary: true,
+          unique: false,
+          unsigned: true,
+          notNull: true,
+          increment: true,
+          comment: "",
+          id: nanoid(),
+        },
+      ],
+      comment: "",
+      indices: [],
+      uniqueConstraints: [],
+      color: defaultBlue,
+      collapsed: false,
+    };
     if (data) {
       setTables((prev) => {
         const temp = prev.slice();
-        temp.splice(data.id, 0, data);
-        return temp.map((t, i) => ({ ...t, id: i }));
+        temp.splice(data.index || tables.length, 0, data.table);
+        return temp;
       });
     } else {
-      setTables((prev) => [
-        ...prev,
-        {
-          id: prev.length,
-          name: `table_${prev.length}`,
-          x: transform.pan.x,
-          y: transform.pan.y,
-          fields: [
-            {
-              name: "id",
-              type: database === DB.GENERIC ? "INT" : "INTEGER",
-              default: "",
-              check: "",
-              primary: true,
-              unique: true,
-              notNull: true,
-              increment: true,
-              comment: "",
-              id: 0,
-            },
-          ],
-          comment: "",
-          indices: [],
-          color: defaultBlue,
-          key: Date.now(),
-        },
-      ]);
+      setTables((prev) => [...prev, newTable]);
     }
     if (addToHistory) {
       setUndoStack((prev) => [
         ...prev,
         {
+          data: data || { table: newTable, index: tables.length - 1 },
           action: Action.ADD,
           element: ObjectType.TABLE,
           message: t("add_table"),
@@ -62,54 +85,62 @@ export default function DiagramContextProvider({ children }) {
       ]);
       setRedoStack([]);
     }
+    if (shouldEmit()) {
+      const created = data?.table ?? newTable;
+      emitDelta({
+        target: "table",
+        action: "create",
+        entityId: created.id,
+        data: [created],
+      });
+    }
   };
 
   const deleteTable = (id, addToHistory = true) => {
     if (addToHistory) {
-      Toast.success(t("table_deleted"));
       const rels = relationships.reduce((acc, r) => {
         if (r.startTableId === id || r.endTableId === id) {
           acc.push(r);
         }
         return acc;
       }, []);
+      const deletedTable = tables.find((t) => t.id === id);
+      const deletedTableIndex = tables.findIndex((t) => t.id === id);
       setUndoStack((prev) => [
         ...prev,
         {
           action: Action.DELETE,
           element: ObjectType.TABLE,
-          data: { table: tables[id], relationship: rels },
-          message: t("delete_table", { tableName: tables[id].name }),
+          data: {
+            table: deletedTable,
+            relationship: rels,
+            index: deletedTableIndex,
+          },
+          message: t("delete_table", { tableName: deletedTable.name }),
         },
       ]);
       setRedoStack([]);
+      Toast.success(t("table_deleted"));
     }
-    setRelationships((prevR) => {
-      return prevR
-        .filter((e) => !(e.startTableId === id || e.endTableId === id))
-        .map((e, i) => {
-          const newR = { ...e };
-
-          if (e.startTableId > id) {
-            newR.startTableId = e.startTableId - 1;
-          }
-          if (e.endTableId > id) {
-            newR.endTableId = e.endTableId - 1;
-          }
-
-          return { ...newR, id: i };
-        });
-    });
-    setTables((prev) => {
-      return prev.filter((e) => e.id !== id).map((e, i) => ({ ...e, id: i }));
-    });
+    setRelationships((prevR) =>
+      prevR.filter((e) => !(e.startTableId === id || e.endTableId === id)),
+    );
+    setTables((prev) => prev.filter((e) => e.id !== id));
     if (id === selectedElement.id) {
       setSelectedElement((prev) => ({
         ...prev,
         element: ObjectType.NONE,
-        id: -1,
+        id: null,
         open: false,
       }));
+    }
+    if (shouldEmit()) {
+      emitDelta({
+        target: "table",
+        action: "delete",
+        entityId: id,
+        data: [id],
+      });
     }
   };
 
@@ -117,31 +148,51 @@ export default function DiagramContextProvider({ children }) {
     setTables((prev) =>
       prev.map((t) => (t.id === id ? { ...t, ...updatedValues } : t)),
     );
+    if (shouldEmit()) {
+      emitDelta({
+        target: "table",
+        action: "update",
+        entityId: id,
+        data: [id, updatedValues],
+      });
+    }
   };
 
   const updateField = (tid, fid, updatedValues) => {
     setTables((prev) =>
-      prev.map((table, i) => {
-        if (tid === i) {
+      prev.map((table) => {
+        if (tid === table.id) {
           return {
             ...table,
-            fields: table.fields.map((field, j) =>
-              fid === j ? { ...field, ...updatedValues } : field,
+            fields: table.fields.map((field) =>
+              fid === field.id ? { ...field, ...updatedValues } : field,
             ),
           };
         }
         return table;
       }),
     );
+    if (shouldEmit()) {
+      emitDelta({
+        target: "table",
+        action: "update",
+        entityId: tid,
+        data: [tid, fid, updatedValues],
+      });
+    }
   };
 
   const deleteField = (field, tid, addToHistory = true) => {
+    const { fields, name } = tables.find((t) => t.id === tid);
+    const referencesField = (r) =>
+      getRelationshipFields(r).some(
+        (p) =>
+          (r.startTableId === tid && p.startFieldId === field.id) ||
+          (r.endTableId === tid && p.endFieldId === field.id),
+      );
     if (addToHistory) {
       const rels = relationships.reduce((acc, r) => {
-        if (
-          (r.startTableId === tid && r.startFieldId === field.id) ||
-          (r.endTableId === tid && r.endFieldId === field.id)
-        ) {
+        if (referencesField(r)) {
           acc.push(r);
         }
         return acc;
@@ -155,50 +206,20 @@ export default function DiagramContextProvider({ children }) {
           tid: tid,
           data: {
             field: field,
+            index: fields.findIndex((f) => f.id === field.id),
             relationship: rels,
           },
           message: t("edit_table", {
-            tableName: tables[tid].name,
+            tableName: name,
             extra: "[delete field]",
           }),
         },
       ]);
       setRedoStack([]);
     }
-    setRelationships((prev) => {
-      const temp = prev
-        .filter(
-          (e) =>
-            !(
-              (e.startTableId === tid && e.startFieldId === field.id) ||
-              (e.endTableId === tid && e.endFieldId === field.id)
-            ),
-        )
-        .map((e, i) => {
-          if (e.startTableId === tid && e.startFieldId > field.id) {
-            return {
-              ...e,
-              startFieldId: e.startFieldId - 1,
-              id: i,
-            };
-          }
-          if (e.endTableId === tid && e.endFieldId > field.id) {
-            return {
-              ...e,
-              endFieldId: e.endFieldId - 1,
-              id: i,
-            };
-          }
-          return { ...e, id: i };
-        });
-      return temp;
-    });
+    setRelationships((prev) => prev.filter((e) => !referencesField(e)));
     updateTable(tid, {
-      fields: tables[tid].fields
-        .filter((e) => e.id !== field.id)
-        .map((t, i) => {
-          return { ...t, id: i };
-        }),
+      fields: fields.filter((e) => e.id !== field.id),
     });
   };
 
@@ -210,7 +231,10 @@ export default function DiagramContextProvider({ children }) {
           {
             action: Action.ADD,
             element: ObjectType.RELATIONSHIP,
-            data: data,
+            data: {
+              relationship: data,
+              index: prevUndo.length,
+            },
             message: t("add_relationship"),
           },
         ]);
@@ -220,30 +244,74 @@ export default function DiagramContextProvider({ children }) {
     } else {
       setRelationships((prev) => {
         const temp = prev.slice();
-        temp.splice(data.id, 0, data);
-        return temp.map((t, i) => ({ ...t, id: i }));
+        temp.splice(data.index ?? temp.length, 0, data.relationship || data);
+        return temp;
+      });
+    }
+    if (shouldEmit()) {
+      const created = data?.relationship ?? data;
+      emitDelta({
+        target: "relationship",
+        action: "create",
+        entityId: created.id,
+        data: [created],
       });
     }
   };
 
   const deleteRelationship = (id, addToHistory = true) => {
     if (addToHistory) {
+      const relationshipIndex = relationships.findIndex((r) => r.id === id);
       setUndoStack((prev) => [
         ...prev,
         {
           action: Action.DELETE,
           element: ObjectType.RELATIONSHIP,
-          data: relationships[id],
+          data: {
+            relationship: relationships[relationshipIndex],
+            index: relationshipIndex,
+          },
           message: t("delete_relationship", {
-            refName: relationships[id].name,
+            refName: relationships[relationshipIndex].name,
           }),
         },
       ]);
       setRedoStack([]);
     }
+    setRelationships((prev) => prev.filter((e) => e.id !== id));
+    if (shouldEmit()) {
+      emitDelta({
+        target: "relationship",
+        action: "delete",
+        entityId: id,
+        data: [id],
+      });
+    }
+    if (
+      selectedElement.element === ObjectType.RELATIONSHIP &&
+      selectedElement.id === id
+    ) {
+      setSelectedElement((prev) => ({
+        ...prev,
+        element: ObjectType.NONE,
+        id: -1,
+        open: false,
+      }));
+    }
+  };
+
+  const updateRelationship = (id, updatedValues) => {
     setRelationships((prev) =>
-      prev.filter((e) => e.id !== id).map((e, i) => ({ ...e, id: i })),
+      prev.map((t) => (t.id === id ? { ...t, ...updatedValues } : t)),
     );
+    if (shouldEmit()) {
+      emitDelta({
+        target: "relationship",
+        action: "update",
+        entityId: id,
+        data: [id, updatedValues],
+      });
+    }
   };
 
   return (
@@ -260,8 +328,11 @@ export default function DiagramContextProvider({ children }) {
         setRelationships,
         addRelationship,
         deleteRelationship,
+        updateRelationship,
         database,
         setDatabase,
+        tablesCount: tables.length,
+        relationshipsCount: relationships.length,
       }}
     >
       {children}

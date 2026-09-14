@@ -1,15 +1,20 @@
-import { useRef, useState } from "react";
-import { Button, Popover, Input } from "@douyinfe/semi-ui";
-import { IconEdit, IconDeleteStroked } from "@douyinfe/semi-icons";
+import { useMemo, useRef, useState } from "react";
 import {
-  Tab,
-  Action,
-  ObjectType,
-  defaultBlue,
-  State,
-} from "../../data/constants";
+  Button,
+  ButtonGroup,
+  Popover,
+  Input,
+  Divider,
+} from "@douyinfe/semi-ui";
+import ColorPicker from "../EditorSidePanel/ColorPicker";
 import {
-  useCanvas,
+  IconEdit,
+  IconDeleteStroked,
+  IconLock,
+  IconUnlock,
+} from "@douyinfe/semi-icons";
+import { Tab, Action, ObjectType, State } from "../../data/constants";
+import {
   useLayout,
   useSettings,
   useUndoRedo,
@@ -17,7 +22,6 @@ import {
   useAreas,
   useSaveState,
 } from "../../hooks";
-import ColorPalette from "../ColorPicker";
 import { useTranslation } from "react-i18next";
 import { useHover } from "usehooks-ts";
 
@@ -25,30 +29,72 @@ export default function Area({
   data,
   onPointerDown,
   setResize,
-  setInitCoords,
+  setInitDimensions,
 }) {
   const ref = useRef(null);
   const isHovered = useHover(ref);
-  const {
-    pointer: {
-      spaces: { diagram: pointer },
-    },
-  } = useCanvas();
   const { layout } = useLayout();
   const { settings } = useSettings();
   const { setSaveState } = useSaveState();
-  const { selectedElement, setSelectedElement } = useSelect();
+  const { updateArea } = useAreas();
+  const {
+    selectedElement,
+    setSelectedElement,
+    bulkSelectedElements,
+    setBulkSelectedElements,
+  } = useSelect();
 
   const handleResize = (e, dir) => {
     setResize({ id: data.id, dir: dir });
-    setInitCoords({
+    setInitDimensions({
       x: data.x,
       y: data.y,
       width: data.width,
       height: data.height,
-      pointerX: pointer.x,
-      pointerY: pointer.y,
     });
+  };
+
+  const lockUnlockArea = (e) => {
+    const locking = !data.locked;
+    updateArea(data.id, { locked: locking });
+
+    const lockArea = () => {
+      setSelectedElement({
+        ...selectedElement,
+        element: ObjectType.NONE,
+        id: -1,
+        open: false,
+      });
+      setBulkSelectedElements((prev) =>
+        prev.filter((el) => el.id !== data.id || el.type !== ObjectType.AREA),
+      );
+    };
+
+    const unlockArea = () => {
+      const elementInBulk = {
+        id: data.id,
+        type: ObjectType.AREA,
+        initialCoords: { x: data.x, y: data.y },
+        currentCoords: { x: data.x, y: data.y },
+      };
+      if (e.ctrlKey || e.metaKey) {
+        setBulkSelectedElements((prev) => [...prev, elementInBulk]);
+      } else {
+        setBulkSelectedElements([elementInBulk]);
+      }
+      setSelectedElement((prev) => ({
+        ...prev,
+        element: ObjectType.AREA,
+        id: data.id,
+        open: false,
+      }));
+    };
+
+    if (locking) {
+      lockArea();
+    } else {
+      unlockArea();
+    }
   };
 
   const edit = () => {
@@ -89,10 +135,20 @@ export default function Area({
     setSaveState(State.SAVING);
   };
 
-  const areaIsSelected = () =>
+  const areaIsOpen = () =>
     selectedElement.element === ObjectType.AREA &&
     selectedElement.id === data.id &&
     selectedElement.open;
+
+  const isSelected = useMemo(() => {
+    return (
+      (selectedElement.id === data.id &&
+        selectedElement.element === ObjectType.AREA) ||
+      bulkSelectedElements.some(
+        (e) => e.type === ObjectType.AREA && e.id === data.id,
+      )
+    );
+  }, [selectedElement, data, bulkSelectedElements]);
 
   return (
     <g ref={ref}>
@@ -105,26 +161,41 @@ export default function Area({
         onPointerDown={onPointerDown}
       >
         <div
-          className={`border-2 ${
+          className={`w-full h-full p-2 rounded cursor-move border-2 ${
             isHovered
               ? "border-dashed border-blue-500"
-              : selectedElement.element === ObjectType.AREA &&
-                  selectedElement.id === data.id
-                ? "border-blue-500"
-                : "border-slate-400"
-          } w-full h-full cursor-move rounded`}
+              : isSelected
+                ? "border-blue-500 opacity-100"
+                : "border-slate-400 opacity-100"
+          }`}
+          style={{ backgroundColor: `${data.color}66` }}
+          onDoubleClick={edit}
         >
-          <div
-            className="w-fill p-2 h-full"
-            style={{ backgroundColor: `${data.color}66` }}
-          >
-            <div className="flex justify-between gap-1 w-full">
-              <div className="text-color select-none overflow-hidden text-ellipsis">
-                {data.name}
-              </div>
-              {(isHovered || (areaIsSelected() && !layout.sidebar)) && (
+          <div className="flex justify-between gap-1 w-full">
+            <div className="text-color select-none overflow-hidden text-ellipsis">
+              {data.name}
+            </div>
+            {(isHovered || (areaIsOpen() && !layout.sidebar)) && (
+              <ButtonGroup
+                type="tertiary"
+                size="small"
+                aria-label="Area actions"
+              >
+                <Button
+                  size="small"
+                  type="tertiary"
+                  icon={
+                    data.locked ? (
+                      <IconLock size="small" />
+                    ) : (
+                      <IconUnlock size="small" />
+                    )
+                  }
+                  onClick={lockUnlockArea}
+                  disabled={layout.readOnly}
+                />
                 <Popover
-                  visible={areaIsSelected() && !layout.sidebar}
+                  visible={areaIsOpen() && !layout.sidebar}
                   onClickOutSide={onClickOutSide}
                   stopPropagation
                   content={<EditPopoverContent data={data} />}
@@ -133,17 +204,14 @@ export default function Area({
                   showArrow
                 >
                   <Button
-                    icon={<IconEdit />}
                     size="small"
-                    theme="solid"
-                    style={{
-                      backgroundColor: "#2F68ADB3",
-                    }}
+                    type="tertiary"
+                    icon={<IconEdit size="small" />}
                     onClick={edit}
                   />
                 </Popover>
-              )}
-            </div>
+              </ButtonGroup>
+            )}
           </div>
         </div>
       </foreignObject>
@@ -197,10 +265,46 @@ export default function Area({
 
 function EditPopoverContent({ data }) {
   const [editField, setEditField] = useState({});
-  const { setSaveState } = useSaveState();
   const { updateArea, deleteArea } = useAreas();
   const { setUndoStack, setRedoStack } = useUndoRedo();
   const { t } = useTranslation();
+  const { layout } = useLayout();
+  const initialColorRef = useRef(data.color);
+
+  const handleColorPick = (color) => {
+    setUndoStack((prev) => {
+      let undoColor = initialColorRef.current;
+      const lastColorChange = prev.findLast(
+        (e) =>
+          e.element === ObjectType.AREA &&
+          e.aid === data.id &&
+          e.action === Action.EDIT &&
+          e.redo?.color,
+      );
+      if (lastColorChange) {
+        undoColor = lastColorChange.redo.color;
+      }
+
+      if (color === undoColor) return prev;
+
+      const newStack = [
+        ...prev,
+        {
+          action: Action.EDIT,
+          element: ObjectType.AREA,
+          aid: data.id,
+          undo: { color: undoColor },
+          redo: { color: color },
+          message: t("edit_area", {
+            areaName: data.name,
+            extra: "[color]",
+          }),
+        },
+      ];
+      return newStack;
+    });
+    setRedoStack([]);
+  };
 
   return (
     <div className="popover-theme">
@@ -210,6 +314,7 @@ function EditPopoverContent({ data }) {
           value={data.name}
           placeholder={t("name")}
           className="me-2"
+          readonly={layout.readOnly}
           onChange={(value) => updateArea(data.id, { name: value })}
           onFocus={(e) => setEditField({ name: e.target.value })}
           onBlur={(e) => {
@@ -231,59 +336,25 @@ function EditPopoverContent({ data }) {
             setRedoStack([]);
           }}
         />
-        <Popover
-          content={
-            <div className="popover-theme">
-              <ColorPalette
-                currentColor={data.color}
-                onPickColor={(c) => {
-                  setUndoStack((prev) => [
-                    ...prev,
-                    {
-                      action: Action.EDIT,
-                      element: ObjectType.AREA,
-                      aid: data.id,
-                      undo: { color: data.color },
-                      redo: { color: c },
-                      message: t("edit_area", {
-                        areaName: data.name,
-                        extra: "[color]",
-                      }),
-                    },
-                  ]);
-                  setRedoStack([]);
-                  updateArea(data.id, {
-                    color: c,
-                  });
-                }}
-                onClearColor={() => {
-                  updateArea(data.id, {
-                    color: defaultBlue,
-                  });
-                  setSaveState(State.SAVING);
-                }}
-              />
-            </div>
-          }
-          position="rightTop"
-          showArrow
-        >
-          <div
-            className="h-[32px] w-[32px] rounded"
-            style={{ backgroundColor: data.color }}
-          />
-        </Popover>
+        <ColorPicker
+          usePopover={true}
+          readOnly={layout.readOnly}
+          value={data.color}
+          onChange={(color) => updateArea(data.id, { color })}
+          onColorPick={(color) => handleColorPick(color)}
+        />
       </div>
-      <div className="flex">
-        <Button
-          icon={<IconDeleteStroked />}
-          type="danger"
-          block
-          onClick={() => deleteArea(data.id, true)}
-        >
-          {t("delete")}
-        </Button>
-      </div>
+      <Divider />
+      <Button
+        icon={<IconDeleteStroked />}
+        type="danger"
+        theme="borderless"
+        block
+        onClick={() => deleteArea(data.id, true)}
+        disabled={layout.readOnly}
+      >
+        {t("delete")}
+      </Button>
     </div>
   );
 }
